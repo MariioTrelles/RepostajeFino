@@ -7,7 +7,7 @@ name = "repostaje-fino"
 version = "0.1.0"
 description = "Optimizador de repostaje en ruta: dónde repostar y cuánto para minimizar el coste del viaje"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
@@ -29,7 +29,7 @@ include = ["app*"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

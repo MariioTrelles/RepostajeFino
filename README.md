@@ -22,10 +22,12 @@ Siguiendo el orden de [`ARQUITECTURA.md` §12](ARQUITECTURA.md):
 
 ## Puesta en marcha
 
-Requiere Python >= 3.9.
+Requiere **Python >= 3.12**. El motivo es concreto: el SQLite que empaqueta Python 3.9
+(3.35.5) viene compilado **sin el módulo R\*Tree**, que `ARQUITECTURA.md` §2 y §8 dan
+por disponible para el filtro espacial. Python 3.12 trae SQLite 3.49 con R\*Tree.
 
 ```bash
-py -3 -m venv .venv
+py -3.12 -m venv .venv
 .venv\Scripts\activate          # Windows
 pip install -e ".[dev]"
 copy .env.example .env          # y ajustar
