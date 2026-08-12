@@ -2,14 +2,11 @@
 
 Objetos planos, sin dependencias de adaptadores, red ni base de datos. Los
 construyen tanto la ingesta como el DP, y son la moneda de cambio de los puertos.
-
-Los modelos del optimizador (``Vehiculo``, ``TramoRuta``, ``Recomendacion``) se
-añaden en el paso 2; aquí están solo las entidades que necesita ya la ingesta.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
@@ -51,3 +48,115 @@ class Precio:
     def euros_por_litro(self) -> Decimal:
         """Valor en euros, exacto. ``Decimal`` a propósito, no ``float``."""
         return Decimal(self.precio_milesimas) / Decimal(1000)
+
+
+@dataclass(frozen=True, slots=True)
+class Vehiculo:
+    """Depósito modelado como capacidad + nivel actual (ARQUITECTURA.md §7).
+
+    Más preciso que una autonomía simplificada, y necesario para que el DP decida
+    *cuánto* repostar y no solo dónde.
+
+    El consumo va siempre en **L/100km**, nunca en €/100km ni mezclado con el
+    precio, para que el dato sea reutilizable venga de donde venga (hoy lo teclea
+    el usuario; mañana, quizá, un catálogo de modelos).
+
+    ``tipo_combustible`` es **uno solo**: el que el DP optimiza. No confundir con
+    el filtro de combustibles de la UI, que es de visualización y admite varios.
+    """
+
+    consumo_l_100km: float
+    tipo_combustible: str
+    capacidad_deposito_l: float
+    nivel_actual_l: float
+    reserva_minima_l: float = 5.0
+
+    @property
+    def autonomia_maxima_km(self) -> float:
+        """Km que puede recorrer con el depósito lleno sin bajar de la reserva."""
+        return (self.capacidad_deposito_l - self.reserva_minima_l) * 100.0 / self.consumo_l_100km
+
+    @property
+    def autonomia_actual_km(self) -> float:
+        """Km que puede recorrer *ahora* sin bajar de la reserva."""
+        return (self.nivel_actual_l - self.reserva_minima_l) * 100.0 / self.consumo_l_100km
+
+    def litros_para(self, km: float) -> float:
+        return km * self.consumo_l_100km / 100.0
+
+
+@dataclass(frozen=True, slots=True)
+class EstacionCandidata:
+    """Estación considerada por el DP, con su precio ya resuelto.
+
+    El DP no consulta precios: los recibe. Quién decidió que esta estación entra
+    en la lista (bbox, desvío máximo, filtro de marca) es problema de fuera.
+    """
+
+    estacion: Estacion
+    precio: Precio
+
+    @property
+    def precio_milesimas(self) -> int:
+        return self.precio.precio_milesimas
+
+    @property
+    def euros_por_litro(self) -> Decimal:
+        return self.precio.euros_por_litro
+
+
+@dataclass(frozen=True, slots=True)
+class TramoRuta:
+    """Un tramo del plan: de un punto al siguiente, sin paradas intermedias."""
+
+    desde: str
+    hasta: str
+    distancia_km: float
+    duracion_s: float
+    combustible_l: float
+    nivel_llegada_l: float
+
+
+@dataclass(frozen=True, slots=True)
+class Parada:
+    """Una parada a repostar: dónde, cuánto y a qué precio."""
+
+    candidata: EstacionCandidata
+    litros: float
+    nivel_llegada_l: float
+    nivel_salida_l: float
+    coste_eur: Decimal
+    km_desde_origen: float
+
+    @property
+    def estacion(self) -> Estacion:
+        return self.candidata.estacion
+
+
+@dataclass(frozen=True, slots=True)
+class Recomendacion:
+    """El plan de repostaje: qué hacer y cuánto cuesta.
+
+    Los costes van desglosados a propósito. ``coste_tiempo_eur`` es el **exceso**
+    sobre la ruta directa (desvíos + tiempo de las paradas), no el valor del
+    viaje entero: si no, el número no significa nada para el usuario.
+    """
+
+    paradas: list[Parada] = field(default_factory=list)
+    tramos: list[TramoRuta] = field(default_factory=list)
+    coste_combustible_eur: Decimal = Decimal(0)
+    coste_tiempo_eur: Decimal = Decimal(0)
+    litros_repostados: float = 0.0
+    distancia_total_km: float = 0.0
+    duracion_total_s: float = 0.0
+    desvio_km: float = 0.0
+    desvio_s: float = 0.0
+    nivel_llegada_destino_l: float = 0.0
+
+    @property
+    def coste_total_eur(self) -> Decimal:
+        return self.coste_combustible_eur + self.coste_tiempo_eur
+
+    @property
+    def numero_paradas(self) -> int:
+        return len(self.paradas)
