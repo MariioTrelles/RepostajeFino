@@ -20,13 +20,30 @@ del desvío.
 
 | Capa | Tecnología | Notas |
 |---|---|---|
-| Backend | Python + FastAPI | async; `httpx` para llamadas externas |
+| Backend | Python >= 3.12 + FastAPI | async; `httpx` para llamadas externas |
 | Datos | SQLite (WAL activado) | módulo R*Tree nativo para filtro espacial |
 | Precios | API REST Geoportal Carburantes (MITECO) | sin auth, formato XML/JSON |
 | Recarga eléctrica | NAP DGT, formato DATEX2 | fuente **distinta**, ingesta aparte |
 | Rutas | OSRM | público para prototipo, autoalojado en Docker para producción |
 | Frontend | Web sencilla + Leaflet | tiles OSM (vigilar política de uso si crece) |
 | Algoritmo | Gas station problem con programación dinámica | variante con coste de desvío |
+
+### Python >= 3.12 es un requisito duro, no una preferencia
+
+El SQLite que empaqueta **Python 3.9 (3.35.5) viene compilado sin el módulo
+R\*Tree** (`no such module: rtree`), y de ese módulo depende todo el filtro
+espacial de §8. Python 3.12 trae SQLite 3.49 con R\*Tree incluido.
+
+Comprobación antes de dar por bueno un intérprete:
+
+```python
+import sqlite3
+sqlite3.connect(":memory:").execute(
+    "CREATE VIRTUAL TABLE t USING rtree(id, minx, maxx, miny, maxy)")
+```
+
+Si eso falla, las alternativas son `pysqlite3-binary` o `apsw` (embeben su propio
+SQLite), pero salen más caras que exigir un intérprete moderno.
 
 ---
 
@@ -41,8 +58,11 @@ identificados. El resto se mantiene simple.
 
 ```
 app/
+├── config.py                  # settings desde .env (OSRM_URL, DB_PATH...)
+│
 ├── domain/                    # núcleo, sin dependencias externas
-│   ├── models.py              # Estacion, Precio, Vehiculo, TramoRuta, Recomendacion
+│   ├── models.py              # Estacion, Precio, Vehiculo, EstacionCandidata,
+│   │                          # TramoRuta, Parada, Recomendacion
 │   ├── dp_optimizer.py        # gas station problem + coste de desvío
 │   └── ports/
 │       ├── routing_provider.py
@@ -55,6 +75,8 @@ app/
 │   │   └── sqlite_adapter.py
 │   └── ingestion/
 │       ├── geoportal_client.py    # API MITECO, carburantes
+│       ├── rotulo_normalizer.py   # diccionario manual de marcas (§4.1)
+│       ├── productos.py           # campo de la API -> código interno (§6)
 │       └── ev_charger_client.py   # NAP DGT, DATEX2 (fase 2)
 │
 ├── api/
@@ -94,6 +116,10 @@ Consecuencias prácticas:
 - Los routers de FastAPI: son adaptadores de entrada de facto, no necesitan otra capa
 - El DP: vive en `domain/`, recibe listas de objetos ya construidos y una matriz de
   distancias ya calculada. No conoce SQLite ni OSRM.
+  - Esto no se deja a la buena voluntad: `tests/domain/test_aislamiento_dominio.py`
+    recorre por AST todos los módulos de `app/domain/` y falla si alguno importa
+    algo que no sea librería estándar o `app.domain`. Si un día hace falta añadir
+    ese import, la respuesta correcta es revisar el diseño, no relajar el test.
 
 ### Inyección de dependencias
 
@@ -122,6 +148,11 @@ def get_price_store() -> PriceStore:
   Parsear con `Decimal`, nunca `float`: el DP acumula error y desestabiliza
   los desempates entre estaciones.
 - **Ojo con el formato**: la API usa **coma decimal** en precios, latitud y longitud.
+- **El campo de longitud se llama `Longitud (WGS84)`**, no `Longitud`. Es la
+  primera cosa que rompe una ingesta escrita a partir de la documentación.
+  Conviene aceptar los dos nombres.
+- Un precio a `"0,000"` no es un precio: es ausencia de producto mal codificada.
+  Descartarlo, no guardarlo como cero.
 
 ### Esquema
 
@@ -150,6 +181,19 @@ CREATE TABLE precios (
     valid_from TIMESTAMP NOT NULL
 );
 
+-- "Último precio de (estación, producto)" es la consulta caliente: la usan tanto
+-- el diffing de la ingesta como el cálculo de ruta.
+CREATE INDEX idx_precios_estacion_producto ON precios(estacion_id, producto, id DESC);
+
+-- Filtro espacial (§2 y §8). Geometría de punto: min = max.
+-- El R*Tree guarda coordenadas en float32, así que su filtro es aproximado por
+-- diseño: hay que reconfirmar con lat/lon exactas de `estaciones` en la misma
+-- consulta. No tiene ON CONFLICT, así que al hacer upsert de una estación hay
+-- que borrar y reinsertar su fila aquí.
+CREATE VIRTUAL TABLE estaciones_rtree USING rtree(
+    id, min_lat, max_lat, min_lon, max_lon
+);
+
 -- Fase 2: fuente distinta (NAP DGT), relación N:1
 CREATE TABLE puntos_recarga (
     id INTEGER PRIMARY KEY,
@@ -165,14 +209,29 @@ CREATE TABLE puntos_recarga (
 
 ### Notas sobre los datos del Geoportal
 
-Campos que devuelve `EstacionesTerrestres`:
-`C.P., Dirección, Horario, Latitud, Localidad, Longitud, Margen, Municipio,
-Provincia, Rótulo, Tipo Venta` + un `Precio_X` por producto.
+Campos que devuelve `EstacionesTerrestres`, verificados contra un snapshot real
+del 12/08/2026 (11.514 estaciones, 12 MB):
+
+`C.P., Dirección, Horario, Latitud, Localidad, Longitud (WGS84), Margen,
+Municipio, Provincia, Remisión, Rótulo, Tipo Venta, % BioEtanol,
+% Éster metílico, IDEESS, IDMunicipio, IDProvincia, IDCCAA` + un `Precio X` por
+producto.
 
 - **`Rótulo`** = la marca. **No está normalizado**: aparecen variantes como
   "REPSOL", "REPSOL S.A.", "E.S. REPSOL". Necesita tabla de mapeo o normalización
   en la ingesta para las marcas grandes.
 - **`Tipo Venta`**: filtrar por pública (`P`) en la ingesta, antes de guardar.
+  Ojo: hoy el endpoint público devuelve **el 100% de registros con `P`**, así que
+  el filtro no descarta nada. Se mantiene igualmente porque nada garantiza que
+  siga siendo así, pero conviene saber que ahora mismo no está ejerciendo.
+- **`IDEESS`** es el identificador de la estación y viene como texto. Es la clave
+  primaria de `estaciones`.
+- **Los productos son 23, no los cuatro o cinco de siempre**: además de las
+  gasolinas y gasóleos habituales hay `Adblue`, `Amoniaco`, `Metanol`,
+  `Diésel Renovable`, `Gasolina Renovable`, `Gasolina 95 E25`, `Gasolina 95 E85`,
+  biogás comprimido y licuado. Conviene que la ingesta **avise** cuando aparezca
+  un campo `Precio ...` que el mapeo no conoce, en vez de perderlo en silencio.
+  `Adblue` y `Amoniaco` no son carburante de automoción: no deben llegar al DP.
 - El rótulo puede cambiar (una gasolinera cambia de bandera) → va en la tabla
   mutable, no en el histórico.
 - **No hay campo de recarga eléctrica** en esta API, ni booleano ni nada.
@@ -195,24 +254,47 @@ de programar el filtro):
    tal cual — no hace falta cubrir el 100%, solo las marcas que la gente
    filtrará
 
+**No comparar por substring** (decidido, tras revisar el snapshot real). La forma
+obvia, `any(p in raw_upper for p in patrones)`, produce falsos positivos sobre
+datos reales: `"AVIA" in "CEPSA LA GAVIA 365"` clasifica una estación de Cepsa
+como Avia, y hay varios rótulos así (`BP LA GAVIA 365`, `BP VALDAVIA`...).
+
+La comparación es **por palabra completa**, normalizando antes cualquier carácter
+no alfanumérico a espacio para que `DISA_SHELL`, `-CEPSA-` o `E.S. AVINYÓ` se
+tokenicen igual. El orden del diccionario es el orden de prioridad: gana el
+primero que casa.
+
 ```python
 # adapters/ingestion/rotulo_normalizer.py
 NORMALIZACION_ROTULOS = {
     "REPSOL": ["REPSOL"],
-    "CEPSA": ["CEPSA", "C.E.P.S.A"],
+    "PETRONOR": ["PETRONOR"],
+    "MOEVE": ["MOEVE", "CEPSA", "C E P S A"],   # ver nota abajo
+    "GALP": ["GALP", "GALP&GO"],
     "SHELL": ["SHELL"],
-    "GALP": ["GALP"],
-    "BP": ["BP", "B.P."],
-    # completar tras revisar el snapshot real
+    "BP": ["BP", "B P"],
+    # ...hasta ~20 marcas; ver el módulo para la lista completa
 }
 
+_NO_ALFANUM = re.compile(r"[\W_]+")   # `\w` es unicode-aware: los acentos sobreviven
+
 def normalizar_rotulo(raw: str) -> str:
-    raw_upper = raw.strip().upper()
-    for canonico, patrones in NORMALIZACION_ROTULOS.items():
-        if any(p in raw_upper for p in patrones):
+    limpio = _NO_ALFANUM.sub(" ", raw).strip().upper()
+    for canonico, patron in _PATRONES:       # patrón: (?<!\w)ALTERNATIVAS(?!\w)
+        if patron.search(limpio):
             return canonico
     return "INDEPENDIENTE"
 ```
+
+**Cepsa y Moeve se agrupan bajo `MOEVE`** (decidido). Moeve es el nombre comercial
+actual del grupo, pero en los datos conviven los dos rótulos como marcas
+separadas (596 y 585 estaciones en el snapshot de agosto de 2026), porque el
+rebranding va a medias. Quien filtre por la marca espera ver las ~1.180 del
+grupo, no la mitad.
+
+**Cobertura conseguida**: 20 marcas cubren el **66,5%** de las 11.514 estaciones.
+El 33,5% restante cae en `INDEPENDIENTE`, que es lo esperado: son gasolineras de
+gestor único cuyo rótulo es su propio nombre o un número de expediente.
 
 Se aplica en la ingesta (`geoportal_client.py`), no en consulta: `estaciones.rotulo`
 guarda ya el valor normalizado, `rotulo_raw` conserva el original por si hace
@@ -254,8 +336,9 @@ El DP optimiza sobre **un** combustible: el del coche. El filtro es de visualiza
 Mantenerlos separados en el modelo evita un lío conceptual difícil de deshacer después.
 
 Necesario: tabla de mapeo entre los nombres de campo de la API
-(`Precio_Gasolina_95_E5`, `Precio_Gasoleo_A`...) y códigos internos limpios
-(`gasolina95`, `diesel`). Hacerlo en la ingesta, no en consulta.
+(`Precio Gasolina 95 E5`, `Precio Gasoleo A`...) y códigos internos limpios
+(`gasolina95`, `diesel`). Hacerlo en la ingesta, no en consulta. Está en
+`adapters/ingestion/productos.py`, con los 23 productos reales.
 
 ### Otros filtros
 
@@ -295,6 +378,15 @@ Implicaciones para el DP:
 - Hay que validar que `nivel_actual_l <= capacidad_deposito_l` y que el trayecto
   es factible (si el primer tramo excede la autonomía máxima, avisar en vez de
   devolver "sin solución").
+  - **El hueco inviable no siempre está en el primer tramo.** Puede llegarse a la
+    primera estación y romperse después, si entre dos candidatas consecutivas hay
+    más kilómetros de los que da el depósito lleno. El aviso tiene que señalar
+    *ese* hueco: entre qué dos puntos, cuántos km hay, cuántos se alcanzan y
+    cuántas candidatas quedaron fuera de alcance.
+  - **`nivel_actual_l < reserva_minima_l` es un caso aparte**, no un trayecto
+    inviable. Si el conductor ya va por debajo de la reserva, la pregunta correcta
+    no es "cuál es la ruta óptima" sino "dónde está la gasolinera más cercana"
+    (§10). Avisar de eso explícitamente en vez de devolver un plan imposible.
 
 **Fase 2 (futuro):** catálogo de modelos típicos → puerto `VehicleCatalogProvider`
 con adaptador propio (tabla estática de consumos WLTP o API externa).
@@ -324,6 +416,10 @@ programación dinámica.
    ahorrar 60 céntimos.
 4. El DP vive en `domain/` y es testeable con datos falsos, sin BD ni red.
 
+Medido con la implementación actual: **250 candidatas en una ruta de 1.500 km se
+resuelven en 262 ms**. Confirma el punto 1: preocuparse por la selección de
+candidatas, no por el DP.
+
 ### 8.1. Discretización del nivel de combustible (decidido: 1 litro)
 
 El estado del DP es (estación, litros en el depósito al llegar). Como el nivel de
@@ -338,6 +434,47 @@ Con depósitos típicos (40-70 L) esto da 40-70 estados por estación candidata,
 trivial computacionalmente. Es una constante de ajuste fino, no una decisión de
 diseño: si en el futuro el DP tarda más de lo razonable con rutas muy largas,
 se sube a 2-5 L sin tocar la lógica del algoritmo.
+
+### 8.2. Coste del desvío (decidido: €/hora + tiempo fijo por parada)
+
+El punto 3 de arriba dice *qué* hay que modelar pero no *cómo* valorar el tiempo
+en euros. Modelo elegido:
+
+```python
+coste = combustible comprado
+      + valor_tiempo_eur_h * (exceso de tiempo sobre la ruta directa
+                              + tiempo_parada_s por cada repostaje)
+```
+
+- `valor_tiempo_eur_h`, por defecto **15 €/h**: cuánto vale una hora del
+  conductor. Es el término que impide mandar a nadie fuera de la autovía por unos
+  céntimos. Subirlo si el usuario prefiere no parar.
+- `tiempo_parada_s`, por defecto **300 s**: entrar, repostar, pagar y salir, al
+  margen del desvío.
+- El **combustible** del desvío no necesita término propio: si la matriz lleva
+  distancias reales puerta a puerta (que es lo que devuelve `/table` de OSRM), ir
+  por una estación desviada ya cuesta más kilómetros que no ir.
+
+Consecuencia práctica: **el DP necesita también una matriz de duraciones**, no
+solo de distancias. Sin ella el coste de desvío se reduce al fijo por parada, y
+el algoritmo vuelve a mandar al usuario 4 km fuera de la A-2 por 60 céntimos.
+
+Al presentar el resultado conviene desglosar combustible y tiempo, y expresar el
+tiempo como **exceso sobre la ruta directa**, no como valor del viaje entero: si
+no, el número no significa nada para el usuario.
+
+### 8.3. Aritmética: enteros, ningún float
+
+La función objetivo del DP trabaja en **micro-euros enteros**, no en euros float.
+No es purismo: dos estaciones que difieren en una milésima empatan o se ordenan
+según por dónde haya pasado la acumulación, y el plan cambia entre ejecuciones.
+Con `paso = 1 L`, una unidad de combustible cuesta exactamente
+`precio_milesimas * 1000` micro-euros, así que la conversión ni siquiera pierde
+precisión.
+
+Los redondeos de la discretización van **siempre del lado seguro**: consumo hacia
+arriba, capacidad y nivel inicial hacia abajo. Ningún paso de discretización
+puede producir un plan que en la realidad se quede sin combustible.
 
 ---
 
@@ -367,6 +504,25 @@ Consecuencias de trabajar en local por ahora:
   conexión según User-Agent o IP de origen. Manda un User-Agent de navegador desde
   el principio y **guarda un snapshot local de la respuesta** para poder desarrollar
   y testear sin depender de que el servicio esté vivo.
+- **El endpoint bueno es este**:
+
+  ```
+  https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes/EstacionesTerrestres/
+  ```
+
+  El que citan la mayoría de fuentes y tutoriales, con `PrestacionesServicios` en
+  vez de `PreciosCarburantes`, **devuelve 404** (comprobado en agosto de 2026). El
+  404 lo sirve el IIS del Ministerio, así que parece un cambio de ruta y no una
+  caída. Documentación de las operaciones:
+  `https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes/help`
+- **Volumen esperado por ingesta**, para comparar y detectar que algo va mal:
+  ~11.500 estaciones y ~43.000 precios en la primera carga. A partir de ahí, una
+  reingesta del mismo snapshot debe insertar **0 filas** en `precios`; si inserta
+  más, el diffing está roto.
+- **Snapshots en el repositorio**: el crudo completo (~12 MB) no se versiona. Sí
+  se versiona un subconjunto reducido en `tests/fixtures/`, con los casos límite
+  que el snapshot público no contiene (`Tipo Venta = R`, coordenadas ausentes,
+  precio cero, producto sin mapear, campo de longitud alternativo).
 
 ### A ~100 usuarios concurrentes
 - **OSRM público queda descartado**: su política limita a ~1 req/s y no da garantías
@@ -420,19 +576,31 @@ Cuando se necesiten **múltiples instancias de la API en máquinas distintas**
 - [x] **Persistencia de usuario**: stateless, sin perfiles guardados por ahora
 - [x] **Frecuencia de ingesta**: 2 veces al día
 - [x] **Paso de discretización del DP**: 1 litro (ver sección 8.1)
+- [x] **Versión de Python**: >= 3.12, por el módulo R\*Tree (ver §2)
+- [x] **Coste del desvío**: €/hora sobre el exceso de tiempo + tiempo fijo por
+      parada; 15 €/h y 300 s por defecto (ver §8.2)
+- [x] **Aritmética del DP**: enteros en micro-euros, ningún float (ver §8.3)
+- [x] **Matcher de rótulos**: por palabra completa, no por substring (ver §4.1)
+- [x] **Cepsa y Moeve**: agrupadas bajo `MOEVE` (ver §4.1)
 
 ### Pendientes
 
-Ninguna por ahora. Se irán añadiendo según surjan durante la implementación.
+- [ ] **`direccion` en la tabla `estaciones`**. Hoy no está en el esquema, pero la
+      API la devuelve y el frontend va a necesitar decir "Avenida Castilla-La
+      Mancha, 26" y no solo el municipio. Es una columna en la tabla mutable y una
+      reingesta; el coste de añadirla ahora es cero y luego es una migración.
+- [ ] **Qué hacer con `INDEPENDIENTE`** en el filtro por marca de la UI: es un
+      tercio de las estaciones, así que "no filtrar" y "filtrar por independiente"
+      no pueden ser la misma cosa.
 
 ---
 
 ## 12. Orden sugerido para empezar a programar
 
-1. **Ingesta + esquema**: `geoportal_client.py` + `sqlite_adapter.py`. Baja los datos,
+1. ✅ **Ingesta + esquema**: `geoportal_client.py` + `sqlite_adapter.py`. Baja los datos,
    parsea coma decimal, normaliza rótulos, guarda con el diffing de precios.
    Sin API ni frontend todavía. Verifica que el volumen de filas es el esperado.
-2. **Dominio aislado**: `models.py` + `dp_optimizer.py` con tests usando estaciones
+2. ✅ **Dominio aislado**: `models.py` + `dp_optimizer.py` con tests usando estaciones
    y matriz de distancias inventadas. Aquí está el valor del proyecto; que funcione
    antes de tocar red o mapa.
 3. **`osrm_adapter.py`**: polilínea + `/table` para desvíos reales.
