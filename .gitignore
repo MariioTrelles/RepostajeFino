@@ -1,0 +1,40 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- Entornos virtuales ---
+.venv/
+venv/
+env/
+
+# --- Herramientas ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Secretos y configuración local ---
+.env
+
+# --- Datos generados ---
+# La BD SQLite se reconstruye con la ingesta, no se versiona.
+data/*.db
+data/*.db-wal
+data/*.db-shm
+# Snapshots crudos completos (~10 MB cada uno). El fixture reducido para tests
+# sí se versiona, en tests/fixtures/.
+data/snapshots/
+
+# --- SO / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
