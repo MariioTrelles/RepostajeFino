@@ -15,7 +15,7 @@ Siguiendo el orden de [`ARQUITECTURA.md` §12](ARQUITECTURA.md):
 
 - [x] Paso 0 — esqueleto y tooling
 - [x] Paso 1 — ingesta + esquema (`geoportal_client.py`, `sqlite_adapter.py`)
-- [ ] Paso 2 — dominio aislado (`models.py`, `dp_optimizer.py`)
+- [x] Paso 2 — dominio aislado (`models.py`, `dp_optimizer.py`)
 - [ ] Paso 3 — `osrm_adapter.py`
 - [ ] Paso 4 — API FastAPI
 - [ ] Paso 5 — frontend Leaflet
