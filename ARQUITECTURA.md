@@ -18,21 +18,21 @@ del desvío.
 
 ## 2. Stack
 
-| Capa | Tecnología | Notas |
-|---|---|---|
-| Backend | Python >= 3.12 + FastAPI | async; `httpx` para llamadas externas |
-| Datos | SQLite (WAL activado) | módulo R*Tree nativo para filtro espacial |
-| Precios | API REST Geoportal Carburantes (MITECO) | sin auth, formato XML/JSON |
-| Recarga eléctrica | NAP DGT, formato DATEX2 | fuente **distinta**, ingesta aparte |
-| Rutas | OSRM | público para prototipo, autoalojado en Docker para producción |
-| Frontend | Web sencilla + Leaflet | tiles OSM (vigilar política de uso si crece) |
-| Algoritmo | Gas station problem con programación dinámica | variante con coste de desvío |
+| Capa              | Tecnología                                    | Notas                                                         |
+| ----------------- | --------------------------------------------- | ------------------------------------------------------------- |
+| Backend           | Python >= 3.12 + FastAPI                      | async; `httpx` para llamadas externas                         |
+| Datos             | SQLite (WAL activado)                         | módulo R*Tree nativo para filtro espacial                     |
+| Precios           | API REST Geoportal Carburantes (MITECO)       | sin auth, formato XML/JSON                                    |
+| Recarga eléctrica | NAP DGT, formato DATEX2                       | fuente **distinta**, ingesta aparte                            |
+| Rutas             | OSRM                                          | público para prototipo, autoalojado en Docker para producción |
+| Frontend          | Web sencilla + Leaflet                        | tiles OSM (vigilar política de uso si crece)                  |
+| Algoritmo         | Gas station problem con programación dinámica | variante con coste de desvío                                  |
 
 ### Python >= 3.12 es un requisito duro, no una preferencia
 
 El SQLite que empaqueta **Python 3.9 (3.35.5) viene compilado sin el módulo
-R\*Tree** (`no such module: rtree`), y de ese módulo depende todo el filtro
-espacial de §8. Python 3.12 trae SQLite 3.49 con R\*Tree incluido.
+R*Tree** (`no such module: rtree`), y de ese módulo depende todo el filtro
+espacial de §8. Python 3.12 trae SQLite 3.49 con R*Tree incluido.
 
 Comprobación antes de dar por bueno un intérprete:
 
@@ -64,6 +64,7 @@ app/
 │   ├── models.py              # Estacion, Precio, Vehiculo, EstacionCandidata,
 │   │                          # TramoRuta, Parada, Recomendacion
 │   ├── dp_optimizer.py        # gas station problem + coste de desvío
+│   ├── precio_efectivo.py     # precioEfectivo(estacion, usuario) — ver §6.1
 │   └── ports/
 │       ├── routing_provider.py
 │       └── price_store.py
@@ -103,6 +104,7 @@ Sin login, sin perfiles guardados, sin sesión persistida en servidor. Cada requ
 a la API de rutas lleva todo lo necesario (origen, destino, `Vehiculo` completo).
 
 Consecuencias prácticas:
+
 - No hace falta tabla de usuarios ni de vehículos guardados en el esquema
 - El frontend puede guardar el último `Vehiculo` introducido en el propio
   navegador (localStorage) para no repetir el formulario cada vez — eso es
@@ -164,6 +166,7 @@ CREATE TABLE estaciones (
     rotulo_raw TEXT,                  -- valor original del ministerio
     lat REAL NOT NULL,
     lon REAL NOT NULL,
+    direccion TEXT,                   -- "Avenida Castilla-La Mancha, 26"
     municipio TEXT,
     provincia TEXT,
     horario TEXT,
@@ -212,10 +215,9 @@ CREATE TABLE puntos_recarga (
 Campos que devuelve `EstacionesTerrestres`, verificados contra un snapshot real
 del 12/08/2026 (11.514 estaciones, 12 MB):
 
-`C.P., Dirección, Horario, Latitud, Localidad, Longitud (WGS84), Margen,
-Municipio, Provincia, Remisión, Rótulo, Tipo Venta, % BioEtanol,
-% Éster metílico, IDEESS, IDMunicipio, IDProvincia, IDCCAA` + un `Precio X` por
-producto.
+`C.P., Dirección, Horario, Latitud, Localidad, Longitud (WGS84), Margen, Municipio,
+Provincia, Remisión, Rótulo, Tipo Venta, % BioEtanol, % Éster metílico, IDEESS,
+IDMunicipio, IDProvincia, IDCCAA` + un `Precio X` por producto.
 
 - **`Rótulo`** = la marca. **No está normalizado**: aparecen variantes como
   "REPSOL", "REPSOL S.A.", "E.S. REPSOL". Necesita tabla de mapeo o normalización
@@ -300,6 +302,36 @@ Se aplica en la ingesta (`geoportal_client.py`), no en consulta: `estaciones.rot
 guarda ya el valor normalizado, `rotulo_raw` conserva el original por si hace
 falta revisar o ampliar el diccionario más adelante.
 
+### 4.2. Antigüedad de precios (decidido: descartar a partir de 48 h)
+
+Ninguna API garantiza que una estación siga reportando. Una gasolinera puede
+cerrar, cambiar de gestor o simplemente dejar de actualizar sin que el Geoportal
+lo señale de ninguna forma explícita — sigue apareciendo en el snapshot con el
+último precio conocido, por antiguo que sea. Con ~11.500 estaciones y una
+frecuencia de ingesta de 2x/día, es cuestión de tiempo que esto pase.
+
+**Regla**: un precio se considera **vigente** si `valid_from` está dentro de las
+últimas **48 horas** respecto al momento de la consulta. Ese umbral es una
+constante ajustable (`PRECIO_MAX_ANTIGUEDAD_H = 48`), no una decisión de diseño:
+cubre con margen dos ciclos de ingesta fallidos seguidos sin ser tan laxo como
+para dar por bueno un precio de hace una semana.
+
+Consecuencias prácticas:
+
+- El DP y el filtro de marca/mapa **no descartan la estación por completo**:
+  la estación sigue existiendo y puede tener otros productos vigentes. Lo que
+  se descarta es el precio concreto de ese producto si está caducado.
+- Una estación sin ningún precio vigente para el `tipo_combustible` del
+  `Vehiculo` queda fuera de las candidatas del DP, igual que si nunca hubiera
+  tenido ese producto.
+- En el mapa/listado, un precio caducado se puede seguir mostrando pero
+  **marcado explícitamente** ("sin actualizar desde hace X días") en vez de
+  ocultarlo sin más — es información útil para el usuario, no solo un filtro
+  interno del DP.
+- Esto se resuelve en la consulta (comparando `valid_from` contra `now()`),
+  no en la ingesta: no hace falta un job de limpieza ni tocar el histórico
+  append-only, que sigue intacto.
+
 ---
 
 ## 5. Recarga eléctrica (fase 2)
@@ -327,10 +359,10 @@ gran mayoría de casos.
 
 Distinción importante entre dos usos del combustible, que no deben confundirse:
 
-| Concepto | Cardinalidad | Uso |
-|---|---|---|
-| `Vehiculo.tipo_combustible` | **uno solo** | el que consume el DP para optimizar |
-| Filtro de la UI | varios | qué precios se muestran en el mapa / listado |
+| Concepto                    | Cardinalidad | Uso                                          |
+| ---------------------------- | ------------ | --------------------------------------------- |
+| `Vehiculo.tipo_combustible` | **uno solo** | el que consume el DP para optimizar          |
+| Filtro de la UI             | varios       | qué precios se muestran en el mapa / listado |
 
 El DP optimiza sobre **un** combustible: el del coche. El filtro es de visualización.
 Mantenerlos separados en el modelo evita un lío conceptual difícil de deshacer después.
@@ -340,9 +372,64 @@ Necesario: tabla de mapeo entre los nombres de campo de la API
 (`gasolina95`, `diesel`). Hacerlo en la ingesta, no en consulta. Está en
 `adapters/ingestion/productos.py`, con los 23 productos reales.
 
+### 6.1. Precio efectivo vs. precio nominal (decidido: abstracción desde el día uno)
+
+El precio que muestra el Geoportal es el **nominal**, pero el que de verdad paga
+el conductor depende de sus descuentos de fidelización (tarjetas de marca,
+apps de flota, acuerdos de empresa...). Dos conductores frente a la misma
+estación pueden tener un coste real distinto, y eso puede cambiar cuál es la
+estación *óptima* — no solo cuál se muestra más barata en el mapa.
+
+Por eso el precio con el que trabajan el DP y el ranking **nunca es el campo
+`precio_milesimas` directamente**, sino el resultado de una función:
+
+```python
+# domain/precio_efectivo.py
+def precio_efectivo(
+    estacion: Estacion, precio_nominal: int, usuario: PerfilDescuento | None = None
+) -> int:
+    """
+    Devuelve el precio en milésimas de euro que realmente paga el usuario
+    en `estacion`, aplicando los descuentos de fidelización que apliquen.
+    Fase 1: usuario=None (no hay perfil, diseño stateless) -> precio_efectivo == precio_nominal.
+    """
+    ...
+```
+
+**Fase 1 (ahora)**: no hay perfil de usuario (persistencia stateless, §3), así
+que `usuario` siempre es `None` y `precio_efectivo` es la identidad — devuelve
+el precio nominal tal cual. La función existe igualmente y es la que consumen
+el DP, el ranking y el mapa, nunca `precio_milesimas` en crudo. `usuario` es
+opcional precisamente para que fase 1 no tenga que inventarse un
+`PerfilDescuento` vacío solo para cumplir la firma.
+
+**Por qué abstraer ya, aunque hoy no haga nada**: introducir esto más adelante
+obligaría a tocar el DP, el caching y la capa de presentación a la vez, porque
+los tres asumirían hoy que "precio" es un único número por estación. Poner la
+función desde el principio, aunque sea la identidad, hace que añadir descuentos
+después sea cambiar la implementación de una función pura, no un rediseño.
+
+**Fase 2 (futuro)**: `PerfilDescuento` viaja en el propio request (coherente con
+el diseño stateless — no se guarda en servidor), con las marcas y el
+porcentaje/importe de descuento que aplique el usuario. `precio_efectivo` pasa
+a tener lógica real; el DP, el ranking y el mapa no cambian ni una línea.
+
 ### Otros filtros
 
 - **Por marca**: `WHERE rotulo IN (...)` sobre tabla mutable, indexado
+  - **`INDEPENDIENTE` no es una opción filtrable** (decidido). El filtro de marca
+    solo ofrece las ~20 marcas del diccionario de normalización (§4.1), que son
+    las que agrupan a un número significativo de estaciones bajo un nombre
+    reconocible. `INDEPENDIENTE` no es una marca real — es "todo lo que no
+    encajó" (un tercio de las estaciones, cada una con su propio `rotulo_raw`),
+    así que no tiene sentido como checkbox equivalente a "REPSOL" o "SHELL".
+  - Las estaciones `INDEPENDIENTE` **están siempre presentes por defecto**,
+    con o sin filtro de marca activo: no se ocultan salvo que el usuario
+    seleccione explícitamente una o varias marcas del diccionario, en cuyo
+    caso el filtro se comporta como cabría esperar (`WHERE rotulo IN (...)`
+    deja fuera todo lo que no sea esa marca, incluidas las independientes).
+    Esto evita el caso raro de "no toco ningún filtro y desaparece un tercio
+    del mapa".
 - **Con cargador eléctrico**: `LEFT JOIN puntos_recarga ... HAVING COUNT(...) > 0`,
   permitiendo además filtrar por potencia mínima (los usuarios de VE filtran por kW,
   no solo por "tiene o no tiene")
@@ -368,6 +455,7 @@ class Vehiculo:
 ```
 
 Implicaciones para el DP:
+
 - El **estado** del DP es el nivel de combustible al llegar a cada estación
   candidata. Discretizar en pasos (ej. 1 L) o usar la formulación exacta.
 - **Reserva mínima obligatoria**: el óptimo matemático llega a las estaciones
@@ -387,6 +475,13 @@ Implicaciones para el DP:
     inviable. Si el conductor ya va por debajo de la reserva, la pregunta correcta
     no es "cuál es la ruta óptima" sino "dónde está la gasolinera más cercana"
     (§10). Avisar de eso explícitamente en vez de devolver un plan imposible.
+    **Aclaración**: "más cercana" se calcula respecto al **origen del trayecto**
+    indicado en el request, no respecto a una posición en tiempo real del
+    usuario — eso último es la función descrita en §10, que depende de
+    geolocalización del frontend y hoy no está implementada. Con el diseño
+    actual (origen/destino fijos, sin geolocalización), el origen es la única
+    posición que la API conoce, así que es el punto de referencia correcto
+    para este caso hasta que exista la función de posición en tiempo real.
 
 **Fase 2 (futuro):** catálogo de modelos típicos → puerto `VehicleCatalogProvider`
 con adaptador propio (tabla estática de consumos WLTP o API externa).
@@ -440,7 +535,7 @@ se sube a 2-5 L sin tocar la lógica del algoritmo.
 El punto 3 de arriba dice *qué* hay que modelar pero no *cómo* valorar el tiempo
 en euros. Modelo elegido:
 
-```python
+```
 coste = combustible comprado
       + valor_tiempo_eur_h * (exceso de tiempo sobre la ruta directa
                               + tiempo_parada_s por cada repostaje)
@@ -476,6 +571,36 @@ Los redondeos de la discretización van **siempre del lado seguro**: consumo hac
 arriba, capacidad y nivel inicial hacia abajo. Ningún paso de discretización
 puede producir un plan que en la realidad se quede sin combustible.
 
+### 8.4. Resiliencia ante fallos de OSRM (decidido: reintentos + degradación explícita, sin fallback silencioso)
+
+OSRM público (§9) no da garantías de uptime ni respeta siempre el límite de
+1 req/s bajo carga, y `/table` es una dependencia dura tanto para la selección
+de candidatas como para el coste del desvío (§8.2). Una petición de ruta óptima
+no debería romperse por completo por un fallo transitorio de un servicio externo.
+
+**Enfoque elegido**:
+
+1. **Reintentos con backoff exponencial acotado** (ej. 3 intentos, 0.5 s / 1 s / 2 s)
+   ante timeout o 5xx de OSRM. Cubre el caso más común: un pico de carga puntual
+   del servidor público.
+2. **Si los reintentos se agotan, no se aproxima el `/table` con distancia
+   euclídea u otro sucedáneo silencioso.** El coste de desvío depende de
+   carretera real, no de línea recta, y el punto 2 de §8 ya explica por qué la
+   distancia en línea recta lleva a recomendaciones absurdas (mandar a alguien
+   campo a través). Un fallback silencioso cambiaría la calidad del resultado
+   sin que el usuario lo sepa.
+3. **En su lugar, se degrada explícitamente**: la API devuelve el mejor plan
+   calculable con lo que sí respondió OSRM (si hubo respuesta parcial) o un
+   error claro indicando que el cálculo de ruta no está disponible ahora mismo,
+   en vez de un plan silenciosamente peor o un 500 genérico. El frontend puede
+   entonces decidir cómo mostrarlo (reintentar, avisar al usuario), pero esa
+   decisión no se toma escondida dentro del adaptador.
+4. Esto vive enteramente en `osrm_adapter.py`: es un detalle del adaptador, no
+   del puerto `RoutingProvider` ni del dominio. Cuando se pase a OSRM
+   autoalojado (§9, ~100 usuarios), el mismo mecanismo sigue siendo válido —
+   incluso un servidor propio puede tener un mal momento — aunque los timeouts
+   probablemente puedan acortarse al no depender de una red pública compartida.
+
 ---
 
 ## 9. Escalado
@@ -486,24 +611,30 @@ Todo en una máquina. SQLite + FastAPI + OSRM público. Sin Docker obligatorio,
 sin proxy inverso, sin nada.
 
 Consecuencias de trabajar en local por ahora:
+
 - **OSRM público es aceptable** mientras seas el único usuario (respetando 1 req/s).
+
 - **Pero mete un `.env` con `OSRM_URL` desde el primer commit.** Cuando quieras pasar
   a OSRM propio, es cambiar una variable, no buscar URLs hardcodeadas por el código.
   El puerto `RoutingProvider` ya cubre el cambio de motor; la variable cubre el
   cambio de host.
+
 - **La ingesta la lanzas a mano o con cron local.** No montes un scheduler dentro
   de FastAPI: cuando llegue el despliegue real querrás que sea un proceso aparte,
   y ya está diseñado así.
+
 - **Frecuencia de ingesta: 2 veces al día** (decidido). Cubre el caso normal
   (la mayoría de estaciones actualiza precio una vez de madrugada/mañana) más
   margen para las que actualizan más tarde o cambios intradía puntuales, sin
   arriesgarse a que el Ministerio limite por exceso de peticiones. Configurar
   como cron local (ej. `0 7,15 * * *`) o `systemd timer` cuando se automatice;
   mientras tanto, lanzar `python -m jobs.ingest` a mano vale perfectamente.
+
 - **Ojo con la API del Ministerio**: hay reportes recurrentes de que corta la
   conexión según User-Agent o IP de origen. Manda un User-Agent de navegador desde
   el principio y **guarda un snapshot local de la respuesta** para poder desarrollar
   y testear sin depender de que el servicio esté vivo.
+
 - **El endpoint bueno es este**:
 
   ```
@@ -515,16 +646,19 @@ Consecuencias de trabajar en local por ahora:
   404 lo sirve el IIS del Ministerio, así que parece un cambio de ruta y no una
   caída. Documentación de las operaciones:
   `https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes/help`
+
 - **Volumen esperado por ingesta**, para comparar y detectar que algo va mal:
   ~11.500 estaciones y ~43.000 precios en la primera carga. A partir de ahí, una
   reingesta del mismo snapshot debe insertar **0 filas** en `precios`; si inserta
   más, el diffing está roto.
+
 - **Snapshots en el repositorio**: el crudo completo (~12 MB) no se versiona. Sí
   se versiona un subconjunto reducido en `tests/fixtures/`, con los casos límite
   que el snapshot público no contiene (`Tipo Venta = R`, coordenadas ausentes,
   precio cero, producto sin mapear, campo de longitud alternativo).
 
 ### A ~100 usuarios concurrentes
+
 - **OSRM público queda descartado**: su política limita a ~1 req/s y no da garantías
   de uptime ni de permanencia del acceso. Autoalojar OSRM (extracto España de
   Geofabrik, ~1 GB, perfil coche MLD) en su propio contenedor.
@@ -535,6 +669,7 @@ Consecuencias de trabajar en local por ahora:
 - Varios workers de Uvicorn/Gunicorn en una sola máquina suele bastar.
 
 ### Cuándo sí migrar a Postgres
+
 Cuando se necesiten **múltiples instancias de la API en máquinas distintas**
 (SQLite es un fichero en un disco). No antes.
 
@@ -576,22 +711,32 @@ Cuando se necesiten **múltiples instancias de la API en máquinas distintas**
 - [x] **Persistencia de usuario**: stateless, sin perfiles guardados por ahora
 - [x] **Frecuencia de ingesta**: 2 veces al día
 - [x] **Paso de discretización del DP**: 1 litro (ver sección 8.1)
-- [x] **Versión de Python**: >= 3.12, por el módulo R\*Tree (ver §2)
+- [x] **Versión de Python**: >= 3.12, por el módulo R*Tree (ver §2)
 - [x] **Coste del desvío**: €/hora sobre el exceso de tiempo + tiempo fijo por
       parada; 15 €/h y 300 s por defecto (ver §8.2)
 - [x] **Aritmética del DP**: enteros en micro-euros, ningún float (ver §8.3)
 - [x] **Matcher de rótulos**: por palabra completa, no por substring (ver §4.1)
 - [x] **Cepsa y Moeve**: agrupadas bajo `MOEVE` (ver §4.1)
+- [x] **Precio efectivo vs. nominal**: abstracción `precio_efectivo()` desde el
+      día uno, identidad en fase 1 (ver sección 6.1)
+- [x] **Antigüedad de precios**: se descartan como vigentes a partir de 48 h,
+      la estación se marca como "sin actualizar" en vez de ocultarse (ver §4.2)
+- [x] **Resiliencia ante fallos de OSRM**: reintentos con backoff acotado, sin
+      fallback silencioso a distancia euclídea; degradación explícita si se
+      agotan los reintentos (ver §8.4)
+- [x] **"Gasolinera más cercana" cuando `nivel_actual_l < reserva_minima_l`**:
+      se calcula respecto al origen del trayecto, no a una posición en tiempo
+      real (ver §7)
+- [x] **`direccion` en la tabla `estaciones`**: columna nueva en la tabla mutable
+      (ver esquema en §4)
+- [x] **`INDEPENDIENTE` en el filtro por marca**: no es filtrable como opción;
+      solo las ~20 marcas del diccionario lo son. Las independientes se muestran
+      siempre por defecto y solo desaparecen si el usuario filtra activamente
+      por otra marca (ver §6)
 
 ### Pendientes
 
-- [ ] **`direccion` en la tabla `estaciones`**. Hoy no está en el esquema, pero la
-      API la devuelve y el frontend va a necesitar decir "Avenida Castilla-La
-      Mancha, 26" y no solo el municipio. Es una columna en la tabla mutable y una
-      reingesta; el coste de añadirla ahora es cero y luego es una migración.
-- [ ] **Qué hacer con `INDEPENDIENTE`** en el filtro por marca de la UI: es un
-      tercio de las estaciones, así que "no filtrar" y "filtrar por independiente"
-      no pueden ser la misma cosa.
+Ninguna por ahora. Se irán añadiendo según surjan durante la implementación.
 
 ---
 
