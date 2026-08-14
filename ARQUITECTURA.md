@@ -45,6 +45,10 @@ sqlite3.connect(":memory:").execute(
 Si eso falla, las alternativas son `pysqlite3-binary` o `apsw` (embeben su propio
 SQLite), pero salen más caras que exigir un intérprete moderno.
 
+Comprobado: 3.12.10 trae SQLite 3.49.1 y 3.13.2 trae 3.45.3; **los dos con
+R\*Tree**, así que cualquiera de los dos vale. Ojo con lo contrario de lo que uno
+esperaría: el intérprete más nuevo no trae necesariamente el SQLite más nuevo.
+
 ---
 
 ## 3. Arquitectura
@@ -65,8 +69,9 @@ app/
 │   │                          # TramoRuta, Parada, Recomendacion
 │   ├── dp_optimizer.py        # gas station problem + coste de desvío
 │   ├── precio_efectivo.py     # precioEfectivo(estacion, usuario) — ver §6.1
+│   ├── seleccion_candidatas.py  # corredor + recorte por precio — ver §8.5
 │   └── ports/
-│       ├── routing_provider.py
+│       ├── routing_provider.py   # Coordenada, Ruta, MatrizRuta
 │       └── price_store.py
 │
 ├── adapters/
@@ -80,8 +85,11 @@ app/
 │       ├── productos.py           # campo de la API -> código interno (§6)
 │       └── ev_charger_client.py   # NAP DGT, DATEX2 (fase 2)
 │
+├── main.py                    # app FastAPI: monta el router y poco más
+│
 ├── api/
 │   ├── routes/
+│   │   └── ruta.py            # POST /api/ruta-optima — ver §6.2
 │   └── dependencies.py        # inyección: qué adaptador implementa cada puerto
 │
 └── jobs/
@@ -123,17 +131,39 @@ Consecuencias prácticas:
     algo que no sea librería estándar o `app.domain`. Si un día hace falta añadir
     ese import, la respuesta correcta es revisar el diseño, no relajar el test.
 
+### Qué sí es dominio aunque no lo parezca
+
+**La selección de candidatas vive en `domain/`** (`seleccion_candidatas.py`), no en
+el router. Es tentador tomarla por fontanería —consulta la BD, prepara una llamada
+a OSRM— pero lo que hace es decidir *qué* estaciones compiten por entrar en el
+plan, y eso es la regla de negocio más determinante que hay después del propio DP.
+
+El criterio para distinguirlo: el módulo **solo habla con los puertos**, no con
+SQLite ni con httpx, así que pasa el test de aislamiento igual que el DP y se
+prueba con dobles, sin levantar nada. Metido en el router habría quedado imposible
+de probar sin HTTP, que es justo lo que §12 evita al poner el paso 2 antes del 3.
+
+Regla general: si algo se puede escribir contra los puertos, es dominio; si
+necesita conocer al adaptador concreto, no lo es.
+
 ### Inyección de dependencias
 
 Sin framework. Funciones factory en `api/dependencies.py`:
 
 ```python
+@lru_cache(maxsize=1)
 def get_routing_provider() -> RoutingProvider:
     return OSRMAdapter(base_url=settings.osrm_url)
 
+@lru_cache(maxsize=1)
 def get_price_store() -> PriceStore:
     return SQLiteAdapter(db_path=settings.db_path)
 ```
+
+El `lru_cache` no es optimización prematura: el adaptador de OSRM lleva dentro el
+limitador de ~1 req/s del servidor público (§9), y ese contador solo cuenta si
+todas las peticiones comparten la misma instancia. Devolver un adaptador nuevo
+cada vez equivale a no tener límite.
 
 ---
 
@@ -332,6 +362,16 @@ Consecuencias prácticas:
   no en la ingesta: no hace falta un job de limpieza ni tocar el histórico
   append-only, que sigue intacto.
 
+**Cómo quedó**: la regla es del dominio (`Precio.esta_vigente()` y la constante
+en `models.py`), y el filtro lo aplica la consulta con
+`estaciones_en_bbox(solo_vigentes=...)`. Va **apagado por defecto** a propósito,
+que es lo que permite las dos lecturas de arriba con una sola consulta: el mapa
+lo deja apagado y marca lo caducado, el DP lo enciende y no lo ve.
+
+Consecuencia que sorprende en desarrollo: si dejas la BD dos días sin reingerir,
+la API empieza a devolver "no hay ninguna estación con precio vigente" y parece
+un bug. No lo es: es esta regla. Reingiere y vuelve.
+
 ---
 
 ## 5. Recarga eléctrica (fase 2)
@@ -347,7 +387,7 @@ Consecuencias prácticas:
 
 ---
 
-## 6. Filtros de la app
+## 6. Filtros y API de la app
 
 ### Combustibles (decidido)
 
@@ -414,6 +454,18 @@ el diseño stateless — no se guarda en servidor), con las marcas y el
 porcentaje/importe de descuento que aplique el usuario. `precio_efectivo` pasa
 a tener lógica real; el DP, el ranking y el mapa no cambian ni una línea.
 
+**Con un perfil, la función falla en vez de aplicar la identidad** (decidido). Si
+alguien pasa un `PerfilDescuento` hoy, salta `NotImplementedError`. La tentación
+era ignorarlo y devolver el nominal, pero eso daría un precio silenciosamente
+equivocado y, con él, un plan equivocado: exactamente el fallo que esta
+abstracción existe para prevenir. Mismo criterio que §8.4 con OSRM.
+
+**Cómo lo consume el DP**: los precios efectivos se resuelven **una sola vez** al
+entrar al optimizador y esa lista es la única fuente de precios del resto del
+cálculo, incluida la reconstrucción del plan que se le enseña al usuario. Así la
+cuenta con la que se decide y la que se muestra no pueden divergir. El nominal
+sigue disponible en `EstacionCandidata`, pero solo para mostrarlo.
+
 ### Otros filtros
 
 - **Por marca**: `WHERE rotulo IN (...)` sobre tabla mutable, indexado
@@ -433,6 +485,49 @@ a tener lógica real; el DP, el ranking y el mapa no cambian ni una línea.
 - **Con cargador eléctrico**: `LEFT JOIN puntos_recarga ... HAVING COUNT(...) > 0`,
   permitiendo además filtrar por potencia mínima (los usuarios de VE filtran por kW,
   no solo por "tiene o no tiene")
+
+El filtro de marca lo aplica ya la consulta de bbox, y la lista de marcas
+ofrecibles la sirve `GET /api/marcas` desde el propio diccionario de §4.1: la UI
+no tiene que mantener su propia copia, y `INDEPENDIENTE` no aparece porque no
+está en el diccionario. Pedir una marca que no esté en esa lista es un 422, no
+un resultado vacío silencioso.
+
+### 6.2. La API (decidido: un endpoint, coordenadas, plan + mapa en una llamada)
+
+`POST /api/ruta-optima`. Stateless (§3): el request lleva origen, destino y el
+`Vehiculo` completo, más los ajustes opcionales de §8.2 y el filtro de marca.
+
+**Origen y destino son coordenadas, no texto** (decidido). Geocodificar en el
+servidor obligaría a un puerto y un adaptador que §3 no contempla, y a cargar con
+la política de uso de otro servicio público más. El paso 5 tiene el mapa delante:
+resolver "Madrid" es cosa del cliente, por clic o por Nominatim desde el navegador.
+
+**La respuesta trae el plan, la polilínea y las candidatas consideradas**
+(decidido) con su precio y su marca de vigencia (§4.2). El frontend pinta mapa y
+plan con una sola llamada, sin un segundo endpoint que repetiría el trabajo de
+OSRM. El coste va desglosado en combustible y tiempo, con el tiempo como exceso
+sobre la ruta directa (§8.2).
+
+**Los fallos no se disfrazan de plan**, cada uno con su código y sus números:
+
+| Situación                              | Código | Cuerpo                                            |
+| -------------------------------------- | ------ | ------------------------------------------------- |
+| Conductor por debajo de la reserva (§7) | 422    | aviso + gasolineras más cercanas **al origen**    |
+| Trayecto inviable (§7)                 | 422    | el hueco concreto: entre qué dos puntos y cuántos km |
+| Ninguna candidata con precio vigente   | 422    | sugerencia de ensanchar el corredor o quitar filtros |
+| OSRM agotó los reintentos (§8.4)       | 503    | el cálculo no está disponible ahora mismo          |
+| OSRM respondió pero mal                | 502    | el código de error que devolvió                    |
+
+Si OSRM resuelve unas candidatas y otras no, la petición **sale con 200 y un
+aviso** diciendo cuántas se quedaron fuera: es la degradación explícita de §8.4,
+ni un 500 ni un plan silenciosamente peor.
+
+**Pendiente para el paso 5**: hoy el endpoint solo conoce el combustible del
+coche, así que el mapa solo puede pintar ese. El filtro multi-combustible de
+visualización necesitará o bien conformarse con eso, o bien un endpoint de mapa
+aparte que acepte varios productos. Es la distinción entre
+`Vehiculo.tipo_combustible` y el filtro de la UI —la tabla del principio de §6—
+llevada hasta el final, y es lo único de ella que sigue sin resolver.
 
 ---
 
@@ -482,6 +577,9 @@ Implicaciones para el DP:
     actual (origen/destino fijos, sin geolocalización), el origen es la única
     posición que la API conoce, así que es el punto de referencia correcto
     para este caso hasta que exista la función de posición en tiempo real.
+    Implementado así en §6.2: la API responde 422 con las gasolineras más
+    cercanas al origen, y lo resuelve **antes** de gastar una sola petición en
+    OSRM, porque en ese caso no hay ninguna ruta que calcular.
 
 **Fase 2 (futuro):** catálogo de modelos típicos → puerto `VehicleCatalogProvider`
 con adaptador propio (tabla estática de consumos WLTP o API externa).
@@ -514,6 +612,12 @@ programación dinámica.
 Medido con la implementación actual: **250 candidatas en una ruta de 1.500 km se
 resuelven en 262 ms**. Confirma el punto 1: preocuparse por la selección de
 candidatas, no por el DP.
+
+Con la API entera montada el punto 1 se ve todavía más claro. Una petición real
+de Madrid a Barcelona (617 km, 33 candidatas) tarda **1,5 s de principio a fin**,
+y de esos el DP son milisegundos: **todo lo demás es esperar a OSRM**. Cualquier
+esfuerzo de optimización que no vaya dirigido a reducir peticiones a `/table`
+está mirando al sitio equivocado.
 
 ### 8.1. Discretización del nivel de combustible (decidido: 1 litro)
 
@@ -601,6 +705,65 @@ no debería romperse por completo por un fallo transitorio de un servicio extern
    incluso un servidor propio puede tener un mal momento — aunque los timeouts
    probablemente puedan acortarse al no depender de una red pública compartida.
 
+**Cómo se representa "no hay ruta"**: con `inf` en la celda de la matriz, nunca
+con un cero ni con un número grande. Un cero le diría al DP que ese viaje es
+gratis, que es el peor error posible aquí. Los puntos que OSRM no supo resolver
+salen además listados aparte (`MatrizRuta.indices_sin_respuesta`), y **hay que
+descartarlos antes de llamar al DP**; de eso se encarga la selección de
+candidatas (§8.5). El DP entiende `inf` como "esa arista no existe" y sigue
+trabajando con el resto.
+
+Lo que se aprendió montándolo contra el servidor público (agosto de 2026):
+
+- **`/table` acepta como mucho 100 coordenadas por petición.** Con las 250
+  candidatas de §8 la matriz no cabe ni de lejos, así que se pide **por
+  bloques**. Como un bloque cruzado manda orígenes y destinos en la misma lista,
+  el tamaño de bloque efectivo es la mitad: 50. Esto no es un detalle de
+  implementación, es lo que hace que el número de candidatas se pague al
+  cuadrado (§8.5).
+- **El servidor público sí soporta `annotations=distance`**, que era la duda
+  razonable: sin distancias reales, el coste del desvío de §8.2 no se puede
+  calcular y habría que replantear el modelo. Si algún día un servidor no lo
+  soporta, el adaptador lo dice con un error explícito en vez de apañárselas.
+- **El límite de ~1 req/s hay que respetarlo en el código**, no en la buena
+  intención: el adaptador espacia sus propias peticiones. Con OSRM propio se
+  pone a 0 y desaparece la espera.
+
+### 8.5. Selección de candidatas (decidido: corredor por tramos + cupo por precio)
+
+El punto 1 de §8 dice que aquí está el cuello de botella pero no cómo resolverlo.
+Procedimiento elegido, en dos fases:
+
+1. **Filtro grueso y barato.** La polilínea se trocea en tramos de ~50 km y de
+   cada tramo sale un rectángulo estrecho (5 km de margen por defecto) para el
+   R\*Tree. **Por tramos y no con un rectángulo único**: el bbox de
+   Madrid-Barcelona mete dentro media península, con lo que el filtro espacial
+   no filtra nada. Los tramos comparten el punto de unión para que ninguna
+   estación se cuele por la juntura.
+2. **Recorte por precio antes de gastar red.** De cada tramo pasan solo las más
+   baratas. Es lo que permite bajar de miles de estaciones a unas decenas sin
+   que el plan empeore: una estación cara rodeada de baratas no entra en el
+   óptimo por muy bien situada que esté.
+
+**El cupo se reparte por tramos, no globalmente** (decidido, y es la parte que
+tiene truco). Coger "las 50 más baratas de la ruta" puede dejarlas todas en la
+misma provincia y 300 km sin una sola parada posible: el resultado no es un plan
+peor, es un `TrayectoInviable`. Repartir el cupo garantiza cobertura de punta a
+punta aunque algunos tramos aporten estaciones caras.
+
+**`max_candidatas` = 50 por defecto.** Es el mando que gobierna el tiempo de
+respuesta, y conviene entender por qué: con bloques de 50, `n` candidatas cuestan
+`ceil((n+2)/50)²` peticiones a `/table`, a un segundo cada una con el servidor
+público. 50 candidatas es una petición y unos segundos; 250 son 25 peticiones y
+casi medio minuto de espera. Con OSRM propio (§9) el número puede subir sin
+miedo, porque desaparece el límite de ritmo.
+
+**El orden por tramos es provisional.** El DP exige las candidatas ordenadas por
+avance en la ruta, y el tramo al que pertenece cada una es una buena
+aproximación, pero solo eso. Cuando llega la matriz ya se conoce el kilometraje
+real desde el origen, así que **se reordena con ese dato** en el mismo paso en
+que se descartan las que OSRM no resolvió.
+
 ---
 
 ## 9. Escalado
@@ -647,10 +810,21 @@ Consecuencias de trabajar en local por ahora:
   caída. Documentación de las operaciones:
   `https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes/help`
 
+  Este es el fallo más fácil de dejar escondido: si los tests van contra un
+  snapshot local —que es lo correcto (§9)— la URL mala no la coge nadie hasta que
+  alguien intenta una ingesta de verdad. La bueno confirmada contra el servicio
+  vivo el 14/08/2026: 200, 12,2 MB, 11.507 estaciones.
+
 - **Volumen esperado por ingesta**, para comparar y detectar que algo va mal:
   ~11.500 estaciones y ~43.000 precios en la primera carga. A partir de ahí, una
   reingesta del mismo snapshot debe insertar **0 filas** en `precios`; si inserta
   más, el diffing está roto.
+
+  Cifras reales de dos ingestas separadas por 48 h: 11.514 → 11.507 estaciones
+  (el censo se mueve un poco, es normal) y **24.745 precios nuevos de 43.078
+  leídos, un 57%**. Es el orden de magnitud a esperar en una ingesta con días de
+  por medio; si un ciclo normal inserta el 100%, el diffing no está funcionando,
+  y si inserta el 0% con horas de diferencia, sospecha de la fecha del snapshot.
 
 - **Snapshots en el repositorio**: el crudo completo (~12 MB) no se versiona. Sí
   se versiona un subconjunto reducido en `tests/fixtures/`, con los casos límite
@@ -733,10 +907,28 @@ Cuando se necesiten **múltiples instancias de la API en máquinas distintas**
       solo las ~20 marcas del diccionario lo son. Las independientes se muestran
       siempre por defecto y solo desaparecen si el usuario filtra activamente
       por otra marca (ver §6)
+- [x] **Selección de candidatas**: corredor troceado en tramos de ~50 km y cupo
+      repartido por tramo, no global; 50 candidatas por defecto (ver §8.5)
+- [x] **Dónde vive la selección de candidatas**: en `domain/`, porque se escribe
+      solo contra los puertos (ver §3)
+- [x] **Origen y destino**: coordenadas, sin geocoding en el servidor (ver §6.2)
+- [x] **Respuesta de la API**: plan + polilínea + candidatas en una sola llamada,
+      para que el mapa no necesite un segundo endpoint (ver §6.2)
+- [x] **"No hay ruta" en las matrices**: se representa con `inf` y con la lista
+      de índices sin respuesta; nunca con un cero (ver §8.4)
+- [x] **`precio_efectivo` con un perfil de descuento**: lanza
+      `NotImplementedError` en vez de aplicar la identidad (ver §6.1)
 
 ### Pendientes
 
-Ninguna por ahora. Se irán añadiendo según surjan durante la implementación.
+- [ ] **Filtro multi-combustible para el mapa**. El endpoint de ruta solo conoce
+      el combustible del coche (§6.2), así que hoy el mapa solo puede pintar ese.
+      O el paso 5 se conforma, o hace falta un endpoint de mapa que acepte varios
+      productos. Es la distinción `Vehiculo.tipo_combustible` vs. filtro de la UI
+      (§6) llevada hasta el final.
+- [ ] **Cómo se sirve el frontend**: desde el propio FastAPI (mismo origen, sin
+      CORS que configurar) o aparte con CORS. Hay que decidirlo antes de escribir
+      la primera línea del paso 5, porque cambia el arranque.
 
 ---
 
@@ -748,9 +940,14 @@ Ninguna por ahora. Se irán añadiendo según surjan durante la implementación.
 2. ✅ **Dominio aislado**: `models.py` + `dp_optimizer.py` con tests usando estaciones
    y matriz de distancias inventadas. Aquí está el valor del proyecto; que funcione
    antes de tocar red o mapa.
-3. **`osrm_adapter.py`**: polilínea + `/table` para desvíos reales.
-4. **API FastAPI**: un solo endpoint de ruta óptima que una las tres piezas.
-5. **Frontend Leaflet**: mapa, formulario de vehículo, filtros.
+3. ✅ **`osrm_adapter.py`**: polilínea + `/table` para desvíos reales. Troceado en
+   bloques por el límite de 100 coordenadas, con reintentos y sin fallback (§8.4).
+4. ✅ **API FastAPI**: un solo endpoint de ruta óptima que une las tres piezas
+   (§6.2), más la selección de candidatas que las pega (§8.5).
+5. **Frontend Leaflet**: mapa, formulario de vehículo, filtros. Antes de empezar,
+   las dos decisiones pendientes de §11.
 
 El paso 2 antes del 3 es deliberado: si el DP depende de OSRM para poder probarse,
-pierdes la ventaja principal de haber elegido hexagonal.
+pierdes la ventaja principal de haber elegido hexagonal. Visto en retrospectiva,
+salió bien: cuando llegó OSRM, lo único que hubo que enseñarle al DP fue que una
+distancia puede ser `inf`.
