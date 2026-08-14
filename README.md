@@ -15,8 +15,8 @@ Siguiendo el orden de [`ARQUITECTURA.md` §12](ARQUITECTURA.md):
 
 - [x] Paso 0 — esqueleto y tooling
 - [x] Paso 1 — ingesta + esquema (`geoportal_client.py`, `sqlite_adapter.py`)
-- [x] Paso 2 — dominio aislado (`models.py`, `dp_optimizer.py`)
-- [ ] Paso 3 — `osrm_adapter.py`
+- [x] Paso 2 — dominio aislado (`models.py`, `dp_optimizer.py`, `precio_efectivo.py`)
+- [x] Paso 3 — `osrm_adapter.py` (polilínea + `/table` por bloques, con reintentos)
 - [ ] Paso 4 — API FastAPI
 - [ ] Paso 5 — frontend Leaflet
 
@@ -45,7 +45,7 @@ python -m app.jobs.ingest   # ingesta manual (2 veces/día vía cron, §9)
 ## Estructura
 
 ```
-app/domain/     núcleo: modelos + DP. Sin imports de adapters, red ni SQLite.
+app/domain/     núcleo: modelos + DP + precio efectivo. Sin adapters, red ni SQLite.
 app/adapters/   routing (OSRM), storage (SQLite), ingestion (Geoportal)
 app/api/        FastAPI
 app/jobs/       ingesta, proceso aparte de la web
