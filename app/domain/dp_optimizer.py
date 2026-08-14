@@ -32,6 +32,10 @@ Modelo de coste
 Sin el término de tiempo, el algoritmo manda al usuario 4 km fuera de la A-2 para
 ahorrar 60 céntimos (§8, punto 3).
 
+El "combustible comprado" se valora con ``precio_efectivo`` (§6.1), nunca con el
+precio nominal del Geoportal: los descuentos de fidelización pueden cambiar cuál
+es la estación óptima, no solo cuál se ve más barata.
+
 Aritmética
 ----------
 Todo el DP trabaja en **micro-euros enteros**. Ni un ``float`` en la función
@@ -53,6 +57,7 @@ from app.domain.models import (
     TramoRuta,
     Vehiculo,
 )
+from app.domain.precio_efectivo import PerfilDescuento, precio_efectivo
 
 # Estado del DP = (estación, litros al llegar). Como el nivel es continuo, hay que
 # discretizarlo para tener un número finito de estados que tabular (§8.1).
@@ -154,6 +159,7 @@ def optimizar_repostaje(
     distancias_km: Sequence[Sequence[float]],
     duraciones_s: Sequence[Sequence[float]] | None = None,
     parametros: ParametrosOptimizacion | None = None,
+    usuario: PerfilDescuento | None = None,
 ) -> Recomendacion:
     """Devuelve el plan de repostaje más barato para el trayecto.
 
@@ -166,6 +172,9 @@ def optimizar_repostaje(
             solo se penaliza por los kilómetros de más. Para producción conviene
             pasarla; para tests con datos inventados suele sobrar.
         parametros: ajustes finos del optimizador.
+        usuario: perfil de descuentos de fidelización. Fase 1 siempre ``None``
+            (§6.1); el DP no lo interpreta, solo se lo pasa a
+            ``precio_efectivo``.
 
     Raises:
         VehiculoInvalido: los datos del vehículo no son coherentes.
@@ -175,6 +184,12 @@ def optimizar_repostaje(
     parametros = parametros or ParametrosOptimizacion()
     _validar_vehiculo(vehiculo)
     _validar_matrices(len(candidatas), distancias_km, duraciones_s)
+
+    # El precio con el que optimiza el DP nunca es el nominal (§6.1). Se resuelve
+    # una sola vez, aquí, y esta lista es la única fuente de precios del resto de
+    # la función: así la cuenta que hace el DP y la que se le enseña al usuario no
+    # pueden divergir.
+    precios_u = [precio_efectivo(c.estacion, c.precio_milesimas, usuario) for c in candidatas]
 
     n = len(candidatas)
     n_nodos = n + 2
@@ -223,9 +238,7 @@ def optimizar_repostaje(
             coste[i],
             cap_u,
             precio_unidad=(
-                _micro_eur_por_unidad(candidatas[i - 1].precio_milesimas, paso)
-                if 1 <= i <= n
-                else None
+                _micro_eur_por_unidad(precios_u[i - 1], paso) if 1 <= i <= n else None
             ),
             coste_parada=parada_u,
         )
@@ -253,6 +266,7 @@ def optimizar_repostaje(
     return _reconstruir(
         vehiculo=vehiculo,
         candidatas=candidatas,
+        precios_u=precios_u,
         distancias_km=distancias_km,
         duraciones_s=duraciones_s,
         parametros=parametros,
@@ -382,6 +396,7 @@ def _validar_matrices(
 def _reconstruir(
     vehiculo: Vehiculo,
     candidatas: Sequence[EstacionCandidata],
+    precios_u: Sequence[int],
     distancias_km: Sequence[Sequence[float]],
     duraciones_s: Sequence[Sequence[float]] | None,
     parametros: ParametrosOptimizacion,
@@ -413,12 +428,16 @@ def _reconstruir(
         litros_comprados = (nivel_salida - nivel_llegada) * paso
         if litros_comprados > 0:
             candidata = candidatas[nodo - 1]
-            coste_parada = candidata.euros_por_litro * Decimal(str(litros_comprados))
+            precio_pagado = precios_u[nodo - 1]
+            coste_parada = (
+                Decimal(precio_pagado) / Decimal(1000) * Decimal(str(litros_comprados))
+            )
             coste_combustible += coste_parada
             litros_repostados += litros_comprados
             paradas.append(
                 Parada(
                     candidata=candidata,
+                    precio_efectivo_milesimas=precio_pagado,
                     litros=litros_comprados,
                     nivel_llegada_l=nivel_llegada * paso,
                     nivel_salida_l=nivel_salida * paso,

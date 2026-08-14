@@ -245,6 +245,7 @@ class GeoportalClient:
             rotulo_raw=rotulo_raw,
             lat=lat,
             lon=lon,
+            direccion=(bruto.get("Dirección") or "").strip() or None,
             municipio=(bruto.get("Municipio") or "").strip() or None,
             provincia=(bruto.get("Provincia") or "").strip() or None,
             horario=(bruto.get("Horario") or "").strip() or None,

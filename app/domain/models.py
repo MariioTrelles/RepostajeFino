@@ -7,8 +7,16 @@ construyen tanto la ingesta como el DP, y son la moneda de cambio de los puertos
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
+
+# Un precio se considera vigente si su ``valid_from`` cae dentro de esta ventana
+# (ARQUITECTURA.md §4.2). Ninguna API garantiza que una estación siga reportando:
+# una gasolinera puede cerrar o dejar de actualizar y seguir apareciendo en el
+# snapshot con su último precio, por antiguo que sea. 48 h cubre dos ciclos de
+# ingesta fallidos seguidos sin dar por bueno un precio de la semana pasada.
+# Constante ajustable, no decisión de diseño.
+PRECIO_MAX_ANTIGUEDAD_H = 48
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +33,7 @@ class Estacion:
     rotulo_raw: str
     lat: float
     lon: float
+    direccion: str | None = None
     municipio: str | None = None
     provincia: str | None = None
     horario: str | None = None
@@ -48,6 +57,24 @@ class Precio:
     def euros_por_litro(self) -> Decimal:
         """Valor en euros, exacto. ``Decimal`` a propósito, no ``float``."""
         return Decimal(self.precio_milesimas) / Decimal(1000)
+
+    def antiguedad_horas(self, ahora: datetime | None = None) -> float:
+        return ((ahora or datetime.now()) - self.valid_from).total_seconds() / 3600.0
+
+    def esta_vigente(
+        self,
+        ahora: datetime | None = None,
+        max_antiguedad_h: int = PRECIO_MAX_ANTIGUEDAD_H,
+    ) -> bool:
+        """¿Sigue siendo creíble este precio? (ARQUITECTURA.md §4.2)
+
+        Un precio caducado **no descarta la estación**: puede tener otros
+        productos vigentes, y en el mapa se sigue mostrando marcado como "sin
+        actualizar". Lo que queda fuera es este precio concreto: para el DP, una
+        estación sin precio vigente del combustible del coche es como si nunca
+        hubiera tenido ese producto.
+        """
+        return (ahora or datetime.now()) - self.valid_from <= timedelta(hours=max_antiguedad_h)
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,10 +125,17 @@ class EstacionCandidata:
 
     @property
     def precio_milesimas(self) -> int:
+        """Precio **nominal**, el del Geoportal.
+
+        No es el que debe entrar en ninguna cuenta de coste: para eso está
+        ``precio_efectivo()`` (ARQUITECTURA.md §6.1), que es lo que aplica los
+        descuentos de fidelización del conductor.
+        """
         return self.precio.precio_milesimas
 
     @property
     def euros_por_litro(self) -> Decimal:
+        """Precio nominal en euros. Misma advertencia que ``precio_milesimas``."""
         return self.precio.euros_por_litro
 
 
@@ -119,9 +153,16 @@ class TramoRuta:
 
 @dataclass(frozen=True, slots=True)
 class Parada:
-    """Una parada a repostar: dónde, cuánto y a qué precio."""
+    """Una parada a repostar: dónde, cuánto y a qué precio.
+
+    ``precio_efectivo_milesimas`` es el precio con el que se hizo la cuenta: el
+    que de verdad paga este conductor (§6.1). En fase 1 coincide con el nominal
+    de ``candidata``, pero es el que hay que mostrar y el que explica
+    ``coste_eur``; el nominal sigue accesible por ``candidata.precio_milesimas``.
+    """
 
     candidata: EstacionCandidata
+    precio_efectivo_milesimas: int
     litros: float
     nivel_llegada_l: float
     nivel_salida_l: float

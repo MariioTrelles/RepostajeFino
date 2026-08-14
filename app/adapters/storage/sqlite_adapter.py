@@ -18,10 +18,10 @@ import logging
 import sqlite3
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from app.domain.models import Estacion, Precio
+from app.domain.models import PRECIO_MAX_ANTIGUEDAD_H, Estacion, Precio
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS estaciones (
     rotulo_raw TEXT,
     lat REAL NOT NULL,
     lon REAL NOT NULL,
+    direccion TEXT,
     municipio TEXT,
     provincia TEXT,
     horario TEXT,
@@ -72,6 +73,15 @@ CREATE TABLE IF NOT EXISTS puntos_recarga (
 """
 
 
+# Columnas añadidas después de la primera versión del esquema. Hacen falta porque
+# `CREATE TABLE IF NOT EXISTS` no toca una tabla que ya existe: una BD ingerida
+# antes de que la columna existiera se quedaría sin ella y sin aviso. Los nombres
+# son constantes del módulo, nunca entrada de usuario.
+COLUMNAS_NUEVAS: dict[str, tuple[tuple[str, str], ...]] = {
+    "estaciones": (("direccion", "TEXT"),),
+}
+
+
 class SQLiteAdapter:
     """Implementa ``PriceStore`` sobre un fichero SQLite."""
 
@@ -98,6 +108,26 @@ class SQLiteAdapter:
     def crear_esquema(self) -> None:
         with self._conexion() as conexion:
             conexion.executescript(ESQUEMA)
+            self._anadir_columnas_nuevas(conexion)
+
+    @staticmethod
+    def _anadir_columnas_nuevas(conexion: sqlite3.Connection) -> None:
+        """Pone al día una BD creada con una versión anterior del esquema.
+
+        Las filas ya existentes se quedan con la columna a ``NULL`` hasta la
+        siguiente ingesta, que es exactamente lo que se espera: el dato está en
+        el snapshot del Ministerio, no hay que reconstruirlo de otra parte.
+        """
+        for tabla, columnas in COLUMNAS_NUEVAS.items():
+            existentes = {fila[1] for fila in conexion.execute(f"PRAGMA table_info({tabla})")}
+            for nombre, tipo in columnas:
+                if nombre not in existentes:
+                    conexion.execute(f"ALTER TABLE {tabla} ADD COLUMN {nombre} {tipo}")
+                    logger.info(
+                        "Esquema al día: añadida %s.%s. Se rellena en la próxima ingesta.",
+                        tabla,
+                        nombre,
+                    )
 
     # ------------------------------------------------------------------
     # Escritura
@@ -108,8 +138,8 @@ class SQLiteAdapter:
     ) -> int:
         momento = momento or datetime.now()
         filas = [
-            (e.id, e.rotulo, e.rotulo_raw, e.lat, e.lon, e.municipio, e.provincia, e.horario,
-             momento.isoformat(sep=" ", timespec="seconds"))
+            (e.id, e.rotulo, e.rotulo_raw, e.lat, e.lon, e.direccion, e.municipio, e.provincia,
+             e.horario, momento.isoformat(sep=" ", timespec="seconds"))
             for e in estaciones
         ]
         if not filas:
@@ -119,13 +149,15 @@ class SQLiteAdapter:
             conexion.executemany(
                 """
                 INSERT INTO estaciones
-                    (id, rotulo, rotulo_raw, lat, lon, municipio, provincia, horario, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, rotulo, rotulo_raw, lat, lon, direccion, municipio, provincia,
+                     horario, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     rotulo = excluded.rotulo,
                     rotulo_raw = excluded.rotulo_raw,
                     lat = excluded.lat,
                     lon = excluded.lon,
+                    direccion = excluded.direccion,
                     municipio = excluded.municipio,
                     provincia = excluded.provincia,
                     horario = excluded.horario,
@@ -216,12 +248,23 @@ class SQLiteAdapter:
         max_lon: float,
         producto: str,
         rotulos: Sequence[str] | None = None,
+        solo_vigentes: bool = False,
+        ahora: datetime | None = None,
     ) -> list[tuple[Estacion, Precio]]:
+        """Estaciones del rectángulo con su **último** precio de ``producto``.
+
+        ``solo_vigentes`` aplica la regla de antigüedad de §4.2 (48 h). Va
+        apagado por defecto a propósito: quien pinta el mapa quiere ver también
+        el precio caducado para marcarlo como "sin actualizar desde hace X días"
+        —con ``Precio.esta_vigente()`` lo distingue—, mientras que quien arma las
+        candidatas del DP lo enciende, porque optimizar sobre un precio de la
+        semana pasada es peor que no ofrecer esa estación.
+        """
         # El R*Tree guarda coordenadas en float32, así que su filtro es
         # aproximado por diseño: se reconfirma con lat/lon exactas de la tabla.
         sql = """
-            SELECT e.id, e.rotulo, e.rotulo_raw, e.lat, e.lon, e.municipio, e.provincia,
-                   e.horario, p.producto, p.precio_milesimas, p.valid_from
+            SELECT e.id, e.rotulo, e.rotulo_raw, e.lat, e.lon, e.direccion, e.municipio,
+                   e.provincia, e.horario, p.producto, p.precio_milesimas, p.valid_from
             FROM estaciones_rtree r
             JOIN estaciones e ON e.id = r.id
             JOIN precios p ON p.id = (
@@ -244,6 +287,12 @@ class SQLiteAdapter:
             marcadores = ", ".join(f":rotulo_{i}" for i in range(len(rotulos)))
             sql += f" AND e.rotulo IN ({marcadores})"
             parametros.update({f"rotulo_{i}": r for i, r in enumerate(rotulos)})
+        if solo_vigentes:
+            # `valid_from` se guarda en ISO con segundos, así que comparar como
+            # texto es comparar cronológicamente.
+            umbral = (ahora or datetime.now()) - timedelta(hours=PRECIO_MAX_ANTIGUEDAD_H)
+            sql += " AND p.valid_from >= :umbral"
+            parametros["umbral"] = umbral.isoformat(sep=" ", timespec="seconds")
 
         with self._conexion() as conexion:
             filas = conexion.execute(sql, parametros).fetchall()
@@ -256,6 +305,7 @@ class SQLiteAdapter:
                     rotulo_raw=fila["rotulo_raw"],
                     lat=fila["lat"],
                     lon=fila["lon"],
+                    direccion=fila["direccion"],
                     municipio=fila["municipio"],
                     provincia=fila["provincia"],
                     horario=fila["horario"],

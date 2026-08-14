@@ -118,6 +118,31 @@ def test_lee_longitud_con_nombre_de_campo_alternativo(resultado: ResultadoIngest
     assert estacion.lon == pytest.approx(-3.703790)
 
 
+def test_lee_la_direccion(resultado: ResultadoIngesta) -> None:
+    """El frontend necesita la calle, no solo el municipio (§4)."""
+    estacion = _por_id(resultado, 4375)
+    assert estacion is not None
+    assert estacion.direccion == "AVENIDA CASTILLA LA MANCHA, 26"
+    assert all(e.direccion for e in resultado.estaciones)
+
+
+def test_estacion_sin_direccion_no_rompe(cliente: GeoportalClient) -> None:
+    payload = {
+        "Fecha": "12/08/2026 13:15:46",
+        "ListaEESSPrecio": [
+            {
+                "IDEESS": "1",
+                "Latitud": "40,0",
+                "Longitud (WGS84)": "-3,0",
+                "Rótulo": "REPSOL",
+                "Tipo Venta": "P",
+            }
+        ],
+    }
+    (estacion,) = cliente.parsear(payload).estaciones
+    assert estacion.direccion is None
+
+
 def test_precio_cero_no_genera_precio(resultado: ResultadoIngesta) -> None:
     estacion = _por_id(resultado, 900003)
     assert estacion is not None

@@ -7,6 +7,7 @@ filas o hasta que el histórico deja de ser fiable.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -26,13 +27,20 @@ def store(tmp_path: Path) -> SQLiteAdapter:
     return adaptador
 
 
-def estacion(id_: int, rotulo: str = "REPSOL", lat: float = 40.4, lon: float = -3.7) -> Estacion:
+def estacion(
+    id_: int,
+    rotulo: str = "REPSOL",
+    lat: float = 40.4,
+    lon: float = -3.7,
+    direccion: str | None = "CALLE MAYOR, 1",
+) -> Estacion:
     return Estacion(
         id=id_,
         rotulo=rotulo,
         rotulo_raw=f"E.S. {rotulo}",
         lat=lat,
         lon=lon,
+        direccion=direccion,
         municipio="Madrid",
         provincia="MADRID",
         horario="L-D: 24H",
@@ -65,6 +73,36 @@ def test_wal_activado(store: SQLiteAdapter) -> None:
 def test_contar_rechaza_tablas_arbitrarias(store: SQLiteAdapter) -> None:
     with pytest.raises(ValueError):
         store.contar("estaciones; DROP TABLE precios")
+
+
+def test_una_bd_con_esquema_viejo_se_pone_al_dia(tmp_path: Path) -> None:
+    """`CREATE TABLE IF NOT EXISTS` no añade columnas a una tabla que ya existe.
+
+    Sin la migración, una BD ingerida antes de que existiera `direccion` seguiría
+    sin ella y el upsert fallaría con un error de SQL en vez de arreglarse solo.
+    """
+    ruta = tmp_path / "vieja.db"
+    with sqlite3.connect(ruta) as vieja:
+        vieja.execute(
+            "CREATE TABLE estaciones (id INTEGER PRIMARY KEY, rotulo TEXT NOT NULL, "
+            "rotulo_raw TEXT, lat REAL NOT NULL, lon REAL NOT NULL, municipio TEXT, "
+            "provincia TEXT, horario TEXT, updated_at TIMESTAMP)"
+        )
+        vieja.execute("INSERT INTO estaciones (id, rotulo, lat, lon) VALUES (1, 'REPSOL', 40.4, -3.7)")
+
+    adaptador = SQLiteAdapter(ruta)
+    adaptador.crear_esquema()
+
+    with adaptador._conexion() as conexion:  # noqa: SLF001
+        columnas = {fila[1] for fila in conexion.execute("PRAGMA table_info(estaciones)")}
+        assert "direccion" in columnas
+        # La fila que ya estaba se queda a NULL hasta la siguiente ingesta.
+        assert conexion.execute("SELECT direccion FROM estaciones WHERE id = 1").fetchone()[0] is None
+
+    adaptador.upsert_estaciones([estacion(1, direccion="AVENIDA NUEVA, 3")])
+    adaptador.guardar_precios_si_cambian([precio(1, 1599)])
+    (est, _), = adaptador.estaciones_en_bbox(40.0, -4.0, 41.0, -3.0, "diesel")
+    assert est.direccion == "AVENIDA NUEVA, 3"
 
 
 # ---------------------------------------------------------------------------
@@ -192,12 +230,84 @@ def test_bbox_filtra_por_rectangulo(store: SQLiteAdapter) -> None:
     assert {p.precio_milesimas for _, p in dentro} == {1599, 1699}
 
 
-def test_bbox_solo_devuelve_el_precio_vigente(store: SQLiteAdapter) -> None:
+def test_bbox_devuelve_el_ultimo_precio_conocido(store: SQLiteAdapter) -> None:
     store.upsert_estaciones([estacion(1)])
     store.guardar_precios_si_cambian([precio(1, 1599, momento=T0)])
     store.guardar_precios_si_cambian([precio(1, 1649, momento=T1)])
 
     (_, p), = store.estaciones_en_bbox(40.0, -4.0, 41.0, -3.0, "diesel")
+    assert p.precio_milesimas == 1649
+
+
+def test_bbox_devuelve_la_direccion(store: SQLiteAdapter) -> None:
+    store.upsert_estaciones([estacion(1, direccion="AVENIDA CASTILLA-LA MANCHA, 26")])
+    store.guardar_precios_si_cambian([precio(1, 1599)])
+
+    (est, _), = store.estaciones_en_bbox(40.0, -4.0, 41.0, -3.0, "diesel")
+    assert est.direccion == "AVENIDA CASTILLA-LA MANCHA, 26"
+
+
+# ---------------------------------------------------------------------------
+# Antigüedad de precios (§4.2): se resuelve en la consulta, no en la ingesta
+# ---------------------------------------------------------------------------
+
+
+def test_por_defecto_el_precio_caducado_se_devuelve_para_poder_marcarlo(
+    store: SQLiteAdapter,
+) -> None:
+    """El mapa lo muestra como "sin actualizar", no lo oculta (§4.2)."""
+    store.upsert_estaciones([estacion(1)])
+    store.guardar_precios_si_cambian([precio(1, 1599, momento=T0)])
+
+    (_, p), = store.estaciones_en_bbox(
+        40.0, -4.0, 41.0, -3.0, "diesel", ahora=T0 + timedelta(hours=72)
+    )
+    assert p.precio_milesimas == 1599
+    assert not p.esta_vigente(ahora=T0 + timedelta(hours=72))
+
+
+def test_solo_vigentes_descarta_el_precio_caducado(store: SQLiteAdapter) -> None:
+    """Para el DP: mejor no ofrecer la estación que optimizar sobre un precio viejo."""
+    store.upsert_estaciones([estacion(1)])
+    store.guardar_precios_si_cambian([precio(1, 1599, momento=T0)])
+
+    assert store.estaciones_en_bbox(
+        40.0, -4.0, 41.0, -3.0, "diesel", solo_vigentes=True, ahora=T0 + timedelta(hours=72)
+    ) == []
+    # Dentro de la ventana sí sale.
+    assert store.estaciones_en_bbox(
+        40.0, -4.0, 41.0, -3.0, "diesel", solo_vigentes=True, ahora=T0 + timedelta(hours=47)
+    )
+
+
+def test_un_producto_caducado_no_tumba_los_demas_de_la_estacion(store: SQLiteAdapter) -> None:
+    """§4.2: se descarta el precio concreto, no la estación entera."""
+    store.upsert_estaciones([estacion(1)])
+    store.guardar_precios_si_cambian([precio(1, 1599, "diesel", momento=T0)])
+    ahora = T0 + timedelta(hours=72)
+    store.guardar_precios_si_cambian(
+        [precio(1, 1699, "gasolina95", momento=ahora - timedelta(hours=2))]
+    )
+
+    assert store.estaciones_en_bbox(
+        40.0, -4.0, 41.0, -3.0, "diesel", solo_vigentes=True, ahora=ahora
+    ) == []
+    (est, p), = store.estaciones_en_bbox(
+        40.0, -4.0, 41.0, -3.0, "gasolina95", solo_vigentes=True, ahora=ahora
+    )
+    assert est.id == 1
+    assert p.precio_milesimas == 1699
+
+
+def test_solo_vigentes_mira_el_ultimo_precio_no_el_historico(store: SQLiteAdapter) -> None:
+    """Un histórico viejo no revive: lo que cuenta es la fecha del último precio."""
+    store.upsert_estaciones([estacion(1)])
+    store.guardar_precios_si_cambian([precio(1, 1599, momento=T0)])
+    store.guardar_precios_si_cambian([precio(1, 1649, momento=T0 + timedelta(hours=71))])
+
+    (_, p), = store.estaciones_en_bbox(
+        40.0, -4.0, 41.0, -3.0, "diesel", solo_vigentes=True, ahora=T0 + timedelta(hours=72)
+    )
     assert p.precio_milesimas == 1649
 
 

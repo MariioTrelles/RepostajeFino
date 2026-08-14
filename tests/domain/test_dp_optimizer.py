@@ -17,6 +17,7 @@ from app.domain.dp_optimizer import (
     optimizar_repostaje,
 )
 from app.domain.models import Vehiculo
+from app.domain.precio_efectivo import PerfilDescuento
 
 from .conftest import EstacionEnRuta, escenario
 
@@ -316,6 +317,63 @@ def test_sin_valor_del_tiempo_el_desvio_sale_gratis(coche: Vehiculo) -> None:
 
     assert plan.paradas[0].candidata.precio_milesimas == 1300
     assert plan.coste_total_eur == Decimal("7.80")
+
+
+# ---------------------------------------------------------------------------
+# Precio efectivo: el DP nunca optimiza sobre el precio nominal (§6.1)
+# ---------------------------------------------------------------------------
+
+
+def _dos_estaciones():
+    """La barata de cara al Geoportal está en el PK 100; la cara, en el 150."""
+    return escenario(
+        [
+            EstacionEnRuta(pk_km=100, precio_milesimas=1700, rotulo="SIN_DESCUENTO"),
+            EstacionEnRuta(pk_km=150, precio_milesimas=1900, rotulo="CON_DESCUENTO"),
+        ],
+        largo_km=300,
+    )
+
+
+def test_sin_descuentos_el_efectivo_es_el_nominal(coche: Vehiculo) -> None:
+    candidatas, distancias, duraciones = _dos_estaciones()
+
+    plan = optimizar_repostaje(coche, candidatas, distancias, duraciones)
+
+    parada = plan.paradas[0]
+    assert parada.candidata.estacion.rotulo == "SIN_DESCUENTO"
+    assert parada.precio_efectivo_milesimas == parada.candidata.precio_milesimas == 1700
+
+
+def test_un_descuento_puede_cambiar_la_estacion_elegida(
+    coche: Vehiculo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La prueba de que la abstracción sirve: fase 2 no toca el DP.
+
+    Se sustituye `precio_efectivo` por una implementación con descuentos, como
+    la que traerá la fase 2, y el plan cambia de estación sin haber cambiado una
+    línea del optimizador. Es justo el argumento de §6.1 para escribir la
+    función antes de que haga nada.
+    """
+
+    def con_descuento(estacion, precio_nominal, usuario=None):
+        return 1000 if estacion.rotulo == "CON_DESCUENTO" else precio_nominal
+
+    monkeypatch.setattr("app.domain.dp_optimizer.precio_efectivo", con_descuento)
+    candidatas, distancias, duraciones = _dos_estaciones()
+
+    plan = optimizar_repostaje(
+        coche, candidatas, distancias, duraciones, usuario=PerfilDescuento()
+    )
+
+    parada = plan.paradas[0]
+    assert parada.candidata.estacion.rotulo == "CON_DESCUENTO"
+    # El nominal se conserva; la cuenta se hace con el efectivo.
+    assert parada.candidata.precio_milesimas == 1900
+    assert parada.precio_efectivo_milesimas == 1000
+    assert parada.litros == pytest.approx(15.0)
+    assert parada.coste_eur == Decimal("15.00")
+    assert plan.coste_combustible_eur == Decimal("15.00")
 
 
 # ---------------------------------------------------------------------------

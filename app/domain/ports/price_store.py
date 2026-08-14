@@ -42,12 +42,19 @@ class PriceStore(Protocol):
         max_lon: float,
         producto: str,
         rotulos: Sequence[str] | None = None,
+        solo_vigentes: bool = False,
+        ahora: datetime | None = None,
     ) -> list[tuple[Estacion, Precio]]:
-        """Estaciones dentro del rectángulo con precio vigente de ``producto``.
+        """Estaciones dentro del rectángulo con su último precio de ``producto``.
 
         Primer filtro (grueso y barato) de la selección de candidatas: el desvío
         real se calcula después con el ``RoutingProvider``, nunca con distancia
         perpendicular a la polilínea (ARQUITECTURA.md §8).
+
+        Con ``solo_vigentes`` se descartan los precios de más de
+        ``PRECIO_MAX_ANTIGUEDAD_H`` horas (§4.2). Sin él se devuelve el último
+        conocido aunque esté caducado, para poder mostrarlo marcado en el mapa
+        en vez de ocultar la estación.
         """
         ...
 

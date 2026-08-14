@@ -22,9 +22,11 @@ class Settings(BaseSettings):
     osrm_url: str = "https://router.project-osrm.org"
     db_path: Path = RAIZ_PROYECTO / "data" / "repostaje.db"
 
+    # Ojo: la ruta que citan casi todos los tutoriales, con `PrestacionesServicios`
+    # en vez de `PreciosCarburantes`, devuelve 404 (ARQUITECTURA.md §9).
     geoportal_url: str = (
         "https://sedeaplicaciones.minetur.gob.es"
-        "/ServiciosRESTCarburantes/PrestacionesServicios/EstacionesTerrestres/"
+        "/ServiciosRESTCarburantes/PreciosCarburantes/EstacionesTerrestres/"
     )
     # El Ministerio corta la conexión según User-Agent (ARQUITECTURA.md §9).
     geoportal_user_agent: str = (
