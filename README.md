@@ -17,7 +17,7 @@ Siguiendo el orden de [`ARQUITECTURA.md` §12](ARQUITECTURA.md):
 - [x] Paso 1 — ingesta + esquema (`geoportal_client.py`, `sqlite_adapter.py`)
 - [x] Paso 2 — dominio aislado (`models.py`, `dp_optimizer.py`, `precio_efectivo.py`)
 - [x] Paso 3 — `osrm_adapter.py` (polilínea + `/table` por bloques, con reintentos)
-- [ ] Paso 4 — API FastAPI
+- [x] Paso 4 — API FastAPI (`POST /api/ruta-optima`)
 - [ ] Paso 5 — frontend Leaflet
 
 ## Puesta en marcha
@@ -39,8 +39,35 @@ copy .env.example .env          # y ajustar
 pytest                  # tests (no tocan red ni la API real)
 ruff check .            # lint
 ruff format .           # formato
-python -m app.jobs.ingest   # ingesta manual (2 veces/día vía cron, §9)
+python -m app.jobs.ingest        # ingesta manual (2 veces/día vía cron, §9)
+uvicorn app.main:app --reload    # API en http://127.0.0.1:8000/docs
 ```
+
+## La API
+
+Un solo endpoint de negocio. Es **stateless**: el request lleva origen, destino y el
+vehículo completo (§3). Sin ingesta previa no hay estaciones que ofrecer.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/ruta-optima -H "Content-Type: application/json" -d '{
+  "origen":  {"lat": 40.416775, "lon": -3.703790},
+  "destino": {"lat": 41.385064, "lon": 2.173404},
+  "vehiculo": {"consumo_l_100km": 6.5, "tipo_combustible": "diesel",
+               "capacidad_deposito_l": 55, "nivel_actual_l": 15, "reserva_minima_l": 5}
+}'
+```
+
+Devuelve el plan (paradas, tramos y costes desglosados en combustible y tiempo), la
+polilínea para el mapa y las candidatas consideradas con su marca de vigencia, de
+forma que el paso 5 se pinte con una sola llamada.
+
+Los fallos no se disfrazan de plan: `422` si el trayecto es inviable (con el hueco
+concreto), `422` con las gasolineras más cercanas si el conductor ya va por debajo de
+la reserva, `503` si OSRM no responde. Nunca una ruta calculada con distancias
+aproximadas (§8.4).
+
+`max_candidatas` (50 por defecto) es el mando del tiempo de respuesta: con el OSRM
+público a 1 req/s, 50 candidatas son unos segundos y 250 casi medio minuto.
 
 ## Estructura
 

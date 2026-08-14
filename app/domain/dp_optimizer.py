@@ -219,7 +219,7 @@ def optimizar_repostaje(
         return math.ceil(litros / paso - _EPS)
 
     def coste_tiempo_arista(i: int, j: int) -> int:
-        if duraciones_s is None:
+        if duraciones_s is None or not math.isfinite(duraciones_s[i][j]):
             return 0
         return int(
             (micro_por_segundo * Decimal(str(duraciones_s[i][j]))).to_integral_value(ROUND_HALF_UP)
@@ -244,6 +244,10 @@ def optimizar_repostaje(
         )
 
         for j in range(i + 1, n_nodos):
+            # `inf` es como el RoutingProvider dice "no sé ir de aquí a allí"
+            # (§8.4). No es una arista cara: es que no existe.
+            if not math.isfinite(distancias_km[i][j]):
+                continue
             consumo_u = consumo_unidades(i, j)
             if consumo_u > cap_u - reserva_u:
                 continue  # ese salto no cabe ni con el depósito lleno
@@ -384,7 +388,13 @@ def _validar_matrices(
             )
     for i in range(esperado):
         for j in range(i + 1, esperado):
-            if distancias_km[i][j] < 0:
+            valor = distancias_km[i][j]
+            if math.isnan(valor):
+                raise ValueError(
+                    f"distancias_km[{i}][{j}] es NaN. Para decir 'no hay ruta' se usa "
+                    "`inf`, que el DP sí sabe interpretar."
+                )
+            if valor < 0:
                 raise ValueError(f"distancias_km[{i}][{j}] es negativa.")
 
 
@@ -529,7 +539,7 @@ def _diagnosticar(
     for i in alcanzables:
         alcance = autonomia_desde(i)
         for j in sin_alcanzar:
-            if j <= i:
+            if j <= i or not math.isfinite(distancias_km[i][j]):
                 continue
             deficit = distancias_km[i][j] - alcance
             if mejor is None or deficit < mejor[0]:

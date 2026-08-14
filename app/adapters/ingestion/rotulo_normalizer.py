@@ -50,6 +50,13 @@ NORMALIZACION_ROTULOS: dict[str, list[str]] = {
 # Cualquier cosa que no sea letra o dígito pasa a ser separador, de forma que
 # "DISA_SHELL", "-CEPSA-" o "E.S. AVINYÓ" se tokenicen igual que "DISA SHELL".
 # `\w` es unicode-aware, así que los acentos sobreviven; `_` sí es separador.
+# Las únicas marcas que la UI y la API ofrecen como filtro (§6 y §11).
+# `INDEPENDIENTE` no está y no debe estar: no es una marca, es "todo lo que no
+# encajó" —un tercio de las estaciones, cada una con su propio rótulo—, así que
+# como casilla no significa nada. Las independientes salen siempre por defecto y
+# solo desaparecen si el usuario filtra activamente por otra marca.
+MARCAS_FILTRABLES: tuple[str, ...] = tuple(NORMALIZACION_ROTULOS)
+
 _NO_ALFANUM = re.compile(r"[\W_]+")
 
 
