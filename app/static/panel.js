@@ -211,6 +211,12 @@ const numero = (selector) => Number($(selector).value);
 // Resultado
 // ---------------------------------------------------------------------------
 
+// Ojo con `distancia_directa_km`: viene de `/route` de OSRM y el plan viene de
+// `/table`, y los dos endpoints no dan el mismo número para el mismo viaje
+// (medido: 642,4 contra 633,0 en Madrid-Barcelona). Restarlos en pantalla le
+// enseña al usuario un desvío negativo. El `desvio_km` del plan sí es fiable
+// porque el DP lo calcula dentro de la matriz, comparando lo comparable.
+
 export function pintarResultado(datos) {
   const avisos =
     datos.avisos.length > 0
@@ -230,9 +236,8 @@ export function pintarResultado(datos) {
     </dl>
     <p class="apunte">
       ${km(datos.distancia_total_km)} en ${duracion(datos.duracion_total_s)}.
-      Parar a repostar te cuesta <strong>${duracion(datos.desvio_s)}</strong> y
-      <strong>${km(datos.desvio_km)}</strong> más que ir de largo
-      (${km(datos.distancia_directa_km)}).
+      Desviarte a repostar añade <strong>${km(datos.desvio_km)}</strong> y
+      <strong>${duracion(datos.desvio_s)}</strong>.
     </p>
     ${listaParadas(datos)}
     ${listaOpciones(datos)}
