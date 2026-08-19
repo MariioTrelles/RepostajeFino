@@ -59,7 +59,7 @@ class ParametrosSeleccion:
     tramo_km: float = 50.0
     max_candidatas: int = 50
     solo_vigentes: bool = True
-    max_desvio_km: float = 10.0
+    max_desvio_km: float = 6.0
 
     @property
     def margen_efectivo_km(self) -> float:
@@ -173,8 +173,44 @@ class MatrizDepurada:
     descartadas_por_desvio: list[EstacionCandidata]
 
 
-def desvio_de(matriz: MatrizRuta, indice: int, destino: int) -> Desvio | None:
+def linea_base(matriz: MatrizRuta, n: int, destino: int) -> Desvio:
+    """Lo que cuesta el viaje **sin parar**, y contra lo que se mide todo desvío.
+
+    Lo obvio sería la celda ``[0][destino]`` de la matriz, y es lo que se hacía.
+    Está mal, y de una forma que engaña hacia el lado peligroso.
+
+    ``/table`` de OSRM devuelve la distancia **del camino más rápido**, no la del
+    más corto. El más rápido puede dar un rodeo por autovía, así que la celda
+    directa a veces es más larga que un camino que pase por una estación. Medido
+    en Madrid-Barcelona: la celda directa daba 642,4 km cuando por una gasolinera
+    pegada a la ruta se llegaba en 636,1. Usar 642,4 de referencia restaba 6,2 km
+    a **todos** los desvíos, y colaba como "a menos de 10 km" gasolineras que
+    estaban a dieciséis.
+
+    Así que la referencia es el camino más corto que la matriz conoce: la celda
+    directa o, si alguna estación lo mejora, esa. Nunca infravalora un desvío, que
+    es el único error que aquí importa: de los dos posibles, el que manda al
+    conductor lejos sin avisar.
+    """
+    mejor_km = matriz.distancias_km[0][destino]
+    mejor_s = matriz.duraciones_s[0][destino]
+    for i in range(1, n + 1):
+        ida, vuelta = matriz.distancias_km[0][i], matriz.distancias_km[i][destino]
+        ida_s, vuelta_s = matriz.duraciones_s[0][i], matriz.duraciones_s[i][destino]
+        if math.isfinite(ida) and math.isfinite(vuelta):
+            mejor_km = min(mejor_km, ida + vuelta)
+        if math.isfinite(ida_s) and math.isfinite(vuelta_s):
+            mejor_s = min(mejor_s, ida_s + vuelta_s)
+    return Desvio(km=mejor_km, segundos=mejor_s)
+
+
+def desvio_de(
+    matriz: MatrizRuta, indice: int, destino: int, base: Desvio
+) -> Desvio | None:
     """Lo que cuesta pasar por ``indice`` en vez de seguir de largo.
+
+    ``base`` es lo que cuesta el viaje sin parar (ver ``linea_base``); no se
+    saca de la celda directa por lo que allí se explica.
 
     ``None`` si OSRM no sabe ir hasta ahí o volver: eso no es un desvío grande,
     es que no hay camino (§8.4).
@@ -182,28 +218,26 @@ def desvio_de(matriz: MatrizRuta, indice: int, destino: int) -> Desvio | None:
     tramos = (
         matriz.distancias_km[0][indice],
         matriz.distancias_km[indice][destino],
-        matriz.distancias_km[0][destino],
         matriz.duraciones_s[0][indice],
         matriz.duraciones_s[indice][destino],
-        matriz.duraciones_s[0][destino],
     )
     if not all(math.isfinite(valor) for valor in tramos):
         return None
-    ida_km, vuelta_km, directo_km, ida_s, vuelta_s, directo_s = tramos
-    # El máximo con cero es por prudencia numérica: la desigualdad triangular no
-    # se rompe en una red de carreteras, pero un empate puede salir en -0.0001 y
+    ida_km, vuelta_km, ida_s, vuelta_s = tramos
+    # El máximo con cero es por prudencia numérica: por construcción la base es
+    # menor o igual que cualquier suma, pero un empate puede salir en -0.0001 y
     # un desvío negativo no significaría nada.
     return Desvio(
-        km=max(0.0, ida_km + vuelta_km - directo_km),
-        segundos=max(0.0, ida_s + vuelta_s - directo_s),
+        km=max(0.0, ida_km + vuelta_km - base.km),
+        segundos=max(0.0, ida_s + vuelta_s - base.segundos),
     )
 
 
 def depurar_matriz(
     candidatas: Sequence[EstacionCandidata],
     matriz: MatrizRuta,
-    max_desvio_km: float = 10.0,
-    max_desvio_min: float = 15.0,
+    max_desvio_km: float = 6.0,
+    max_desvio_min: float = 10.0,
 ) -> MatrizDepurada:
     """Deja solo las candidatas utilizables, con su desvío, en orden de avance.
 
@@ -237,6 +271,7 @@ def depurar_matriz(
         )
 
     max_desvio_s = max_desvio_min * 60.0
+    base = linea_base(matriz, n, destino)
     validas: list[int] = []
     desvios: dict[int, Desvio] = {}
     fuera_de_limite: list[int] = []
@@ -244,7 +279,7 @@ def depurar_matriz(
     for i in range(1, n + 1):
         if i in sin_respuesta:
             continue
-        desvio = desvio_de(matriz, i, destino)
+        desvio = desvio_de(matriz, i, destino, base)
         if desvio is None:
             sin_respuesta.add(i)
             continue

@@ -275,7 +275,7 @@ def test_cada_opcion_es_una_parada_de_verdad_y_cuadra_la_cuenta(
         assert opcion["sobrecoste_eur"] == pytest.approx(
             opcion["coste_viaje_eur"] - optimo, abs=0.01
         )
-        assert opcion["desvio_km"] <= 10.0, "el límite por defecto"
+        assert opcion["desvio_km"] <= 6.0, "el límite por defecto"
 
 
 def test_una_estacion_demasiado_desviada_se_queda_fuera_y_se_dice() -> None:
@@ -283,7 +283,7 @@ def test_una_estacion_demasiado_desviada_se_queda_fuera_y_se_dice() -> None:
 
     La estación 9 está 0,1° al norte del paralelo: 11 km para salirse y otros 11
     para volver, 22 km de desvío. Es barata, así que sin el límite el plan se iría
-    a ella; con el límite de 10 km ni siquiera llega al DP.
+    a ella; con el límite por defecto ni siquiera llega al DP.
 
     El corredor va ancho a propósito. Con el de por defecto la estación ni sale
     del R*Tree, y lo que se quiere medir aquí es el filtro *fino*, el de las
@@ -311,13 +311,21 @@ def test_una_estacion_demasiado_desviada_se_queda_fuera_y_se_dice() -> None:
         ).json()
         ancho = cliente.post(
             "/api/ruta-optima",
-            json=peticion(vehiculo=CON_ALCANCE, margen_corredor_km=20.0, max_desvio_km=30.0),
+            # También el tope de minutos: 22 km de desvío son 13 min en este
+            # doble, y el de por defecto (10) la descartaría antes que los
+            # kilómetros. Aquí se mide el límite de km, así que el otro se aparta.
+            json=peticion(
+                vehiculo=CON_ALCANCE,
+                margen_corredor_km=20.0,
+                max_desvio_km=30.0,
+                max_desvio_min=30.0,
+            ),
         ).json()
 
     ids_estrecho = {c["estacion"]["id"] for c in estrecho["candidatas"]}
     ids_ancho = {c["estacion"]["id"] for c in ancho["candidatas"]}
 
-    assert 9 not in ids_estrecho, "22 km de desvío no caben en el límite de 10"
+    assert 9 not in ids_estrecho, "22 km de desvío no caben en el límite de 6"
     assert 9 in ids_ancho, "con el límite en 30 km sí es una opción viable"
     assert any("desviarse" in aviso for aviso in estrecho["avisos"])
 

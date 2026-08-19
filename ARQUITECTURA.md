@@ -732,21 +732,42 @@ se aplica *antes* del DP, al elegir qué candidatas entran
 merece la pena ir, y dentro de ese conjunto puede mandar el dinero sin producir
 disparates.
 
-**Cómo se mide el desvío.** Contra la ruta directa, en kilómetros de conducción
-real de la matriz de OSRM:
+**Cómo se mide el desvío.** Contra el viaje sin parar, en kilómetros de
+conducción real de la matriz de OSRM:
 
 ```
-desvio = d(origen -> estación) + d(estación -> destino) - d(origen -> destino)
+desvio = d(origen -> estación) + d(estación -> destino) - base
 ```
 
 Es un número **por estación**, no por plan, así que se calcula antes del DP, sirve
 de filtro y se puede enseñar en el mapa. Sigue sin usarse la distancia
 perpendicular a la polilínea (§8, punto 2).
 
-- `max_desvio_km`, por defecto **10 km**: son los kilómetros de más, ida y vuelta.
-  Una gasolinera a 5 km de la carretera son ~10 km de desvío. Es el mando que ve
-  y toca el usuario.
-- `max_desvio_min`, por defecto **15 min**: red de seguridad, no mando principal.
+**Ojo con la `base`: no es la celda `[0][destino]`.** Esa fue la primera versión y
+estaba mal, de una forma que engañaba hacia el lado peligroso. `/table` devuelve
+la distancia **del camino más rápido**, no la del más corto, y el más rápido a
+veces da un rodeo por autovía. Resultado: la celda directa puede ser más larga que
+un camino que pase por una gasolinera pegada a la ruta.
+
+Medido con origen y destino a las afueras de Madrid: la celda directa daba
+642,4 km cuando por una estación de Arganda se llegaba en 636,1. Usar 642,4 de
+referencia le restaba **6,2 km a todos los desvíos** y colaba como "a menos de
+10 km" gasolineras que estaban a dieciséis. El sesgo depende de lo bien que
+enganchen origen y destino con la red: 0,6 km desde el centro de Madrid, 3,7 en
+Madrid-Sevilla, 6,2 desde un punto en mitad del campo. Por eso los resultados
+parecían erráticos.
+
+La referencia es ahora **el camino más corto que la matriz conoce**: la celda
+directa o, si alguna estación lo mejora, esa (`seleccion_candidatas.linea_base`).
+Nunca infravalora un desvío, que de los dos errores posibles es el único que
+importa: el que manda al conductor lejos sin avisar.
+
+- `max_desvio_km`, por defecto **6 km**: son los kilómetros de más, ida y vuelta.
+  Una gasolinera a 3 km de la carretera son ~6 km de desvío. Es el mando que ve y
+  toca el usuario. Empezó en 10 km —los "5 km de la carretera" que se pidieron—,
+  pero con la medida ya corregida 10 seguía admitiendo gasolineras que a ojo están
+  lejos, así que se apretó.
+- `max_desvio_min`, por defecto **10 min**: red de seguridad, no mando principal.
   Cubre el caso que los kilómetros no distinguen: la gasolinera a un kilómetro de
   la vía pero a diez minutos por dentro del pueblo. Sin este tope, con el objetivo
   en euros puros el DP se iría a ella (hay un test que lo fija).
@@ -1104,13 +1125,15 @@ Cuando se necesiten **múltiples instancias de la API en máquinas distintas**
 - [x] **Frecuencia de ingesta**: 2 veces al día
 - [x] **Paso de discretización del DP**: 0,25 litros (ver sección 8.1)
 - [x] **Versión de Python**: >= 3.12, por el módulo R*Tree (ver §2)
-- [x] **Coste del desvío**: restricción dura de desvío (10 km y 15 min por
+- [x] **Coste del desvío**: restricción dura de desvío (6 km y 10 min por
       defecto) con el objetivo en euros de combustible; el tiempo no se cobra
       (ver §8.2)
 - [x] **Opciones al usuario**: no un plan cerrado sino un abanico repartido por
       ventanas de ~45 min, con el sobrecoste en euros de cada una (ver §8.6)
 - [x] **Qué es una opción**: "mi próxima parada es esta", repostando lo que haga
       falta para llegar; no "echa un litro aquí" (ver §8.6)
+- [x] **Referencia del desvío**: el camino más corto que conoce la matriz, no la
+      celda directa, que con `/table` puede ser más larga (ver §8.2)
 - [x] **Aritmética del DP**: enteros en micro-euros, ningún float (ver §8.3)
 - [x] **Matcher de rótulos**: por palabra completa, no por substring (ver §4.1)
 - [x] **Cepsa y Moeve**: agrupadas bajo `MOEVE` (ver §4.1)

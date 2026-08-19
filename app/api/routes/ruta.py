@@ -141,18 +141,18 @@ class RutaOptimaRequest(BaseModel):
         ),
     )
     max_desvio_km: float = Field(
-        default=10.0,
+        default=6.0,
         gt=0,
         le=50,
         description=(
             "Kilómetros extra de conducción que se admiten por pasar por una "
-            "gasolinera, ida y vuelta. Una estación a 5 km de la carretera son "
-            "unos 10 km de desvío. Es el límite que hace viable o inviable una "
+            "gasolinera, ida y vuelta: una estación a 3 km de la carretera son "
+            "unos 6 km de desvío. Es el límite que hace viable o inviable una "
             "opción (§8.2)."
         ),
     )
     max_desvio_min: float = Field(
-        default=15.0,
+        default=10.0,
         gt=0,
         le=60,
         description=(
