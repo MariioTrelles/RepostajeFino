@@ -1,11 +1,12 @@
 /**
  * Capa Leaflet (ARQUITECTURA.md §13.3).
  *
- * Tres capas: la polilínea de la ruta directa, las candidatas y las paradas.
+ * Cuatro capas: la polilínea de la ruta directa, las candidatas, las opciones
+ * donde se puede elegir parar y las paradas del plan.
  * Este módulo no decide nada del plan; solo pinta lo que la API ya calculó.
  */
 
-import { antiguedad, escapar, eurosLitro, km, litros } from "./formato.js";
+import { antiguedad, duracion, escapar, euros, eurosLitro, km, litros } from "./formato.js";
 
 // Rampa secuencial de un solo tono, clara -> oscura, para el precio efectivo.
 // Nada de verde-rojo: el precio es una magnitud, no una polaridad, y además ese
@@ -31,7 +32,10 @@ export function crearMapa(idNodo, { alClicar } = {}) {
 
   const capaRuta = L.layerGroup().addTo(mapa);
   const capaCandidatas = L.layerGroup().addTo(mapa);
+  const capaOpciones = L.layerGroup().addTo(mapa);
   const capaParadas = L.layerGroup().addTo(mapa);
+  // Para que pinchar una opción en el panel abra la del mapa (§8.6).
+  const opcionesPorEstacion = new Map();
   const extremos = { origen: null, destino: null };
 
   if (alClicar) {
@@ -67,7 +71,9 @@ export function crearMapa(idNodo, { alClicar } = {}) {
   function limpiarResultado() {
     capaRuta.clearLayers();
     capaCandidatas.clearLayers();
+    capaOpciones.clearLayers();
     capaParadas.clearLayers();
+    opcionesPorEstacion.clear();
   }
 
   function pintarPlan(datos) {
@@ -82,6 +88,12 @@ export function crearMapa(idNodo, { alClicar } = {}) {
     const cortes = cortesDePrecio(datos.candidatas);
     for (const candidata of datos.candidatas) {
       marcadorCandidata(candidata, cortes).addTo(capaCandidatas);
+    }
+    // Las opciones van por encima de las candidatas y por debajo de las paradas:
+    // son más que una gasolinera cualquiera y menos que el plan recomendado.
+    for (const opcion of datos.opciones ?? []) {
+      const marcador = marcadorOpcion(opcion).addTo(capaOpciones);
+      opcionesPorEstacion.set(opcion.estacion.id, marcador);
     }
     datos.paradas.forEach((parada, indice) => {
       marcadorParada(parada, indice + 1).addTo(capaParadas);
@@ -108,7 +120,23 @@ export function crearMapa(idNodo, { alClicar } = {}) {
     }
   }
 
-  return { mapa, fijarExtremo, encajarExtremos, limpiarResultado, pintarPlan, pintarCercanas };
+  /** Enseña en el mapa la opción que se acaba de pinchar en el panel. */
+  function enfocarOpcion(estacionId) {
+    const marcador = opcionesPorEstacion.get(estacionId);
+    if (!marcador) return;
+    mapa.setView(marcador.getLatLng(), Math.max(mapa.getZoom(), 11));
+    marcador.openPopup();
+  }
+
+  return {
+    mapa,
+    fijarExtremo,
+    encajarExtremos,
+    limpiarResultado,
+    pintarPlan,
+    pintarCercanas,
+    enfocarOpcion,
+  };
 }
 
 /** Los cinco tramos de la rampa, por cuantiles: informativa sea cual sea la horquilla. */
@@ -161,6 +189,39 @@ function estiloCandidata(vigente, color) {
     fillColor: color,
     fillOpacity: vigente ? 1 : 0.15,
   };
+}
+
+/**
+ * Una opción no lleva número: no es un orden que haya que seguir, es un sitio
+ * entre los que elegir. El anillo la distingue de una candidata cualquiera.
+ */
+function marcadorOpcion(opcion) {
+  const { estacion } = opcion;
+  const extra =
+    opcion.sobrecoste_eur > 0
+      ? `<strong>+${euros(opcion.sobrecoste_eur)}</strong> más que parar en la más barata`
+      : "<strong>la parada más barata</strong>";
+
+  return L.marker([estacion.lat, estacion.lon], {
+    icon: L.divIcon({
+      className: `marcador-opcion${opcion.es_la_mas_barata ? " marcador-opcion-mejor" : ""}`,
+      html: "<span></span>",
+      iconSize: [22, 22],
+      iconAnchor: [11, 11],
+    }),
+    zIndexOffset: 250,
+  }).bindPopup(
+    `<strong>${escapar(estacion.rotulo)}</strong><br>` +
+      `${escapar(estacion.direccion ?? "")}<br>` +
+      `A ${duracion(opcion.tiempo_desde_origen_s)} de salir · km ${Math.round(
+        opcion.km_desde_origen,
+      )}<br>` +
+      `<strong>${litros(opcion.litros)}</strong> a ${eurosLitro(
+        opcion.precio_efectivo_eur_litro,
+      )}<br>` +
+      `Desvío: ${km(opcion.desvio_km)} y ${opcion.desvio_min} min<br>` +
+      extra,
+  );
 }
 
 function marcadorParada(parada, numero) {

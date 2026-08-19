@@ -24,6 +24,7 @@ from app.main import app
 # ~85 km por grado de longitud a 40° de latitud: con la ruta sobre el paralelo,
 # la longitud hace de punto kilométrico y las cuentas salen a mano.
 KM_POR_GRADO = 85.0
+KM_POR_GRADO_LAT = 111.0
 ORIGEN = {"lat": 40.0, "lon": -3.0}
 DESTINO = {"lat": 40.0, "lon": 2.0}  # ~425 km al este
 
@@ -85,7 +86,11 @@ class StoreFalso:
 
 
 class RoutingFalso:
-    """Distancias proporcionales a la longitud: la ruta va por el paralelo 40."""
+    """Distancias proporcionales a la longitud: la ruta va por el paralelo 40.
+
+    La latitud también cuenta, y así una estación fuera del paralelo produce un
+    desvío de verdad: hay que salirse para ir y volver a entrar para seguir.
+    """
 
     def __init__(self, sin_respuesta: tuple[int, ...] = (), error: Exception | None = None) -> None:
         self.sin_respuesta = sin_respuesta
@@ -111,13 +116,16 @@ class RoutingFalso:
                 math.inf
                 if i in self.sin_respuesta or j in self.sin_respuesta
                 else abs(puntos[j].lon - puntos[i].lon) * KM_POR_GRADO
+                + abs(puntos[j].lat - puntos[i].lat) * KM_POR_GRADO_LAT
                 for j in range(n)
             ]
             for i in range(n)
         ]
         for i in self.sin_respuesta:
             distancias[i][i] = 0.0
-        duraciones = [[d / 100 * 3600 if math.isfinite(d) else math.inf for d in f] for f in distancias]
+        duraciones = [
+            [d / 100 * 3600 if math.isfinite(d) else math.inf for d in f] for f in distancias
+        ]
         return MatrizRuta(
             distancias_km=tuple(tuple(f) for f in distancias),
             duraciones_s=tuple(tuple(f) for f in duraciones),
@@ -165,9 +173,10 @@ def test_devuelve_un_plan_coherente(cliente: TestClient) -> None:
     assert cuerpo["distancia_directa_km"] == pytest.approx(425.0, abs=1)
     assert cuerpo["paradas"], "un coche con 15 L no llega a 425 km sin repostar"
     assert cuerpo["nivel_llegada_destino_l"] >= COCHE["reserva_minima_l"]
-    assert cuerpo["coste_total_eur"] == pytest.approx(
-        cuerpo["coste_combustible_eur"] + cuerpo["coste_tiempo_eur"], abs=0.01
-    )
+    # La única cifra de dinero son los euros del surtidor: el tiempo no se cobra.
+    assert cuerpo["coste_combustible_eur"] > 0
+    assert "coste_tiempo_eur" not in cuerpo
+    assert "coste_total_eur" not in cuerpo
     # La primera parada solo puede ser la del PK 85: con 15 L se recorren 153 km
     # y la siguiente candidata está a 170.
     assert cuerpo["paradas"][0]["estacion"]["id"] == 1
@@ -195,6 +204,8 @@ def test_devuelve_las_candidatas_y_la_geometria_para_el_mapa(cliente: TestClient
     assert candidata["precio"]["vigente"] is True
     assert candidata["precio"]["antiguedad_horas"] == pytest.approx(3.0, abs=0.1)
     assert candidata["precio_efectivo_eur_litro"] > 0
+    assert candidata["desvio_km"] >= 0
+    assert candidata["desvio_min"] >= 0
 
 
 def test_el_filtro_de_marca_se_aplica(cliente: TestClient) -> None:
@@ -204,17 +215,114 @@ def test_el_filtro_de_marca_se_aplica(cliente: TestClient) -> None:
     con 40 L el viaje se hace del tirón y lo que se mide es solo el filtro.
     """
     respuesta = cliente.post(
-        "/api/ruta-optima", json=peticion(rotulos=["MOEVE"], vehiculo={**COCHE, "nivel_actual_l": 40.0})
+        "/api/ruta-optima",
+        json=peticion(rotulos=["MOEVE"], vehiculo={**COCHE, "nivel_actual_l": 40.0}),
     )
 
     assert respuesta.status_code == 200
     assert {c["estacion"]["rotulo"] for c in respuesta.json()["candidatas"]} == {"MOEVE"}
 
 
-def test_subir_el_valor_del_tiempo_no_rompe_el_plan(cliente: TestClient) -> None:
-    caro = cliente.post("/api/ruta-optima", json=peticion(valor_tiempo_eur_h=100.0)).json()
-    assert caro["coste_tiempo_eur"] > 0
-    assert caro["nivel_llegada_destino_l"] >= COCHE["reserva_minima_l"]
+def test_el_valor_del_tiempo_ya_no_es_un_parametro(cliente: TestClient) -> None:
+    """Ponerle precio a la hora del conductor dejó de ser una opción (§8.2).
+
+    El campo se rechaza en vez de ignorarse en silencio: quien lo mandara estaría
+    esperando un comportamiento que ya no existe.
+    """
+    respuesta = cliente.post("/api/ruta-optima", json=peticion(valor_tiempo_eur_h=100.0))
+    assert respuesta.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Opciones: lo que de verdad se le ofrece al conductor (§8.6)
+# ---------------------------------------------------------------------------
+
+
+# Con 15 L solo se recorren 154 km y la única parada posible es la del PK 85:
+# no hay nada que elegir, y eso también es una respuesta correcta. Para probar el
+# reparto hace falta un coche con alcance para llegar a varias: 25 L dan 307 km,
+# que alcanzan las tres primeras, y aun así obligan a repostar para hacer los 425.
+CON_ALCANCE = {**COCHE, "nivel_actual_l": 25.0}
+
+
+def test_ofrece_varias_opciones_repartidas_por_el_viaje(cliente: TestClient) -> None:
+    cuerpo = cliente.post("/api/ruta-optima", json=peticion(vehiculo=CON_ALCANCE)).json()
+
+    opciones = cuerpo["opciones"]
+    assert len(opciones) >= 2, "un viaje de 425 km da para elegir dónde parar"
+
+    # En el orden en que el conductor se las cruza, que es como se le enseñan.
+    tiempos = [o["tiempo_desde_origen_s"] for o in opciones]
+    assert tiempos == sorted(tiempos)
+
+    # Exactamente una va marcada, y es la que menos cuesta de todas.
+    marcadas = [o for o in opciones if o["es_la_mas_barata"]]
+    assert len(marcadas) == 1
+    assert marcadas[0]["sobrecoste_eur"] == min(o["sobrecoste_eur"] for o in opciones)
+    assert all(o["sobrecoste_eur"] >= 0 for o in opciones)
+
+
+def test_cada_opcion_es_una_parada_de_verdad_y_cuadra_la_cuenta(
+    cliente: TestClient,
+) -> None:
+    """El sobrecoste tiene que poder comprobarse a mano restando dos cifras."""
+    cuerpo = cliente.post("/api/ruta-optima", json=peticion(vehiculo=CON_ALCANCE)).json()
+    optimo = cuerpo["coste_combustible_eur"]
+
+    for opcion in cuerpo["opciones"]:
+        assert opcion["litros"] > 0, "una opción es un sitio donde repostar"
+        assert opcion["paradas"], "el plan de la opción tiene que venir entero"
+        assert opcion["sobrecoste_eur"] == pytest.approx(
+            opcion["coste_viaje_eur"] - optimo, abs=0.01
+        )
+        assert opcion["desvio_km"] <= 10.0, "el límite por defecto"
+
+
+def test_una_estacion_demasiado_desviada_se_queda_fuera_y_se_dice() -> None:
+    """El límite de desvío es lo que sustituye al precio de la hora (§8.2).
+
+    La estación 9 está 0,1° al norte del paralelo: 11 km para salirse y otros 11
+    para volver, 22 km de desvío. Es barata, así que sin el límite el plan se iría
+    a ella; con el límite de 10 km ni siquiera llega al DP.
+
+    El corredor va ancho a propósito. Con el de por defecto la estación ni sale
+    del R*Tree, y lo que se quiere medir aquí es el filtro *fino*, el de las
+    distancias reales, no el rectángulo grueso.
+    """
+    desviada = (
+        Estacion(
+            id=9,
+            rotulo="REPSOL",
+            rotulo_raw="REPSOL",
+            lat=40.1,
+            lon=-1.5,
+            direccion="POLIGONO S/N",
+            municipio="Pueblo 9",
+            provincia="GUADALAJARA",
+        ),
+        precio(9, 1200),
+    )
+    store = StoreFalso([*ESTACIONES, desviada])
+
+    for cliente in cliente_con(store, RoutingFalso()):
+        estrecho = cliente.post(
+            "/api/ruta-optima",
+            json=peticion(vehiculo=CON_ALCANCE, margen_corredor_km=20.0),
+        ).json()
+        ancho = cliente.post(
+            "/api/ruta-optima",
+            json=peticion(vehiculo=CON_ALCANCE, margen_corredor_km=20.0, max_desvio_km=30.0),
+        ).json()
+
+    ids_estrecho = {c["estacion"]["id"] for c in estrecho["candidatas"]}
+    ids_ancho = {c["estacion"]["id"] for c in ancho["candidatas"]}
+
+    assert 9 not in ids_estrecho, "22 km de desvío no caben en el límite de 10"
+    assert 9 in ids_ancho, "con el límite en 30 km sí es una opción viable"
+    assert any("desviarse" in aviso for aviso in estrecho["avisos"])
+
+    desvio_9 = next(c for c in ancho["candidatas"] if c["estacion"]["id"] == 9)
+    assert desvio_9["desvio_km"] == pytest.approx(22.2, abs=0.5)
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,9 @@
 """Tests del DP, con estaciones y matrices inventadas a mano.
 
 Sin BD, sin red, sin OSRM. Los números están elegidos para poder comprobarlos a
-mano: el coche gasta 10 L/100km, así que 1 litro = 10 km.
+mano: el coche gasta 10 L/100km, así que 1 litro = 10 km. El paso de
+discretización es de 0,25 L (§8.1), o sea 2,5 km, y el consumo de cada tramo se
+redondea siempre hacia arriba: por eso alguna cuenta sale en cuartos de litro.
 """
 
 from __future__ import annotations
@@ -20,9 +22,6 @@ from app.domain.models import Vehiculo
 from app.domain.precio_efectivo import PerfilDescuento
 
 from .conftest import EstacionEnRuta, escenario
-
-SIN_COSTE_TIEMPO = ParametrosOptimizacion(valor_tiempo_eur_h=0.0, tiempo_parada_s=0.0)
-
 
 # ---------------------------------------------------------------------------
 # Caso simple: elegir la combinación más barata
@@ -221,9 +220,12 @@ def test_repostar_solo_lo_justo_en_la_cara_y_completar_en_la_barata() -> None:
 def test_prefiere_dos_paradas_baratas_a_una_cara() -> None:
     """La alternativa de una sola parada existe y es viable, pero sale más cara.
 
-    Parar solo en A: 20 L x 1,80 = 36,00 € + 1 parada.
-    Parar en A y B:  33,00 € + 2 paradas (2,50 € de tiempo).
-    35,50 < 37,25, así que el plan de dos paradas gana pese al tiempo extra.
+    Parar solo en A: 20 L x 1,80 = 36,00 €.
+    Parar en A y B:  10 L x 1,80 + 10 L x 1,50 = 33,00 €.
+
+    Con el objetivo en euros de combustible (§8.2), 33 < 36 y gana el de dos
+    paradas. Los cinco minutos de la segunda parada están en la componente de
+    tiempo, que solo desempata: no compiten con tres euros.
     """
     coche = Vehiculo(
         consumo_l_100km=10.0,
@@ -243,7 +245,7 @@ def test_prefiere_dos_paradas_baratas_a_una_cara() -> None:
     plan = optimizar_repostaje(coche, candidatas, distancias, duraciones)
 
     assert plan.numero_paradas == 2
-    assert plan.coste_total_eur == Decimal("35.50")
+    assert plan.coste_combustible_eur == Decimal("33.00")
 
 
 # ---------------------------------------------------------------------------
@@ -251,15 +253,19 @@ def test_prefiere_dos_paradas_baratas_a_una_cara() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _desvio_corto_pero_lento():
-    """Estación urbana barata: solo 1 km fuera de la vía, pero 10 minutos por sentido.
+def test_el_dp_no_arbitra_el_desvio_lento(coche: Vehiculo) -> None:
+    """La estación a 1 km de la vía pero a 10 minutos por sentido: el DP se va a ella.
 
-    Es el caso del que avisa §8. En kilómetros el desvío no se nota, así que el
-    combustible extra (0,2 L) no llega a compensar los 0,70 € que se ahorran en
-    el repostaje: mirando solo el combustible, desviarse *sale a cuenta*. Lo que
-    lo desaconseja son los 20 minutos perdidos.
+    Y hace bien, porque a él ya no le toca decidirlo. Con el objetivo en euros
+    puros (§8.2) desviarse sale a cuenta: 0,2 L de más contra 0,70 € de ahorro.
+    Lo que antes lo impedía era ponerle precio a la hora del conductor; lo que lo
+    impide ahora es que una estación así **no llega al DP**, porque el límite de
+    desvío la deja fuera antes (ver ``test_seleccion_candidatas``).
+
+    El test existe para dejarlo dicho: si alguien vuelve a meter tiempo en la
+    función objetivo, este test se cae y hay que releer §8.2 antes de tocarlo.
     """
-    return escenario(
+    candidatas, distancias, duraciones = escenario(
         [
             EstacionEnRuta(pk_km=100, precio_milesimas=1700),
             EstacionEnRuta(pk_km=105, precio_milesimas=1300, desvio_km=1.0, desvio_s=600.0),
@@ -267,21 +273,13 @@ def _desvio_corto_pero_lento():
         largo_km=200,
     )
 
-
-def test_no_se_desvia_por_unos_centimos(coche: Vehiculo) -> None:
-    """Con el tiempo en la función de coste, se queda en la estación de la vía.
-
-    Desviarse: 6 L x 1,300 = 7,80 € + 1.500 s de tiempo = 14,05 €.
-    Seguir de largo: 5 L x 1,700 = 8,50 € + 300 s de parada = 9,75 €.
-    """
-    candidatas, distancias, duraciones = _desvio_corto_pero_lento()
-
     plan = optimizar_repostaje(coche, candidatas, distancias, duraciones)
 
     assert plan.numero_paradas == 1
-    assert plan.paradas[0].candidata.precio_milesimas == 1700
-    assert plan.desvio_km == pytest.approx(0.0)
-    assert plan.coste_total_eur == Decimal("9.75")
+    assert plan.paradas[0].candidata.precio_milesimas == 1300
+    # 202 km son 20,2 L; se sale con 20 y hay que llegar con 5, así que se compran
+    # 5,2 L redondeados al alza al paso de 0,25: 5,5 L a 1,300.
+    assert plan.coste_combustible_eur == Decimal("7.15")
 
 
 def test_si_el_ahorro_compensa_el_desvio_se_desvia(coche: Vehiculo) -> None:
@@ -299,24 +297,8 @@ def test_si_el_ahorro_compensa_el_desvio_se_desvia(coche: Vehiculo) -> None:
     assert plan.numero_paradas == 1
     assert plan.paradas[0].candidata.precio_milesimas == 1200
     assert plan.desvio_km == pytest.approx(2.0)
-    assert plan.desvio_s == pytest.approx(120.0)
-
-
-def test_sin_valor_del_tiempo_el_desvio_sale_gratis(coche: Vehiculo) -> None:
-    """Contraprueba del test anterior: mismo escenario, sin valorar el tiempo.
-
-    Ahora el plan manda al usuario a la estación desviada por 0,70 €, que es
-    exactamente el comportamiento del que avisa §8 y el motivo de que el término
-    de tiempo no sea opcional en producción.
-    """
-    candidatas, distancias, duraciones = _desvio_corto_pero_lento()
-
-    plan = optimizar_repostaje(
-        coche, candidatas, distancias, duraciones, parametros=SIN_COSTE_TIEMPO
-    )
-
-    assert plan.paradas[0].candidata.precio_milesimas == 1300
-    assert plan.coste_total_eur == Decimal("7.80")
+    # 60 s por sentido de desvío más los 300 s de repostar (§8.2).
+    assert plan.desvio_s == pytest.approx(420.0)
 
 
 # ---------------------------------------------------------------------------
@@ -362,9 +344,7 @@ def test_un_descuento_puede_cambiar_la_estacion_elegida(
     monkeypatch.setattr("app.domain.dp_optimizer.precio_efectivo", con_descuento)
     candidatas, distancias, duraciones = _dos_estaciones()
 
-    plan = optimizar_repostaje(
-        coche, candidatas, distancias, duraciones, usuario=PerfilDescuento()
-    )
+    plan = optimizar_repostaje(coche, candidatas, distancias, duraciones, usuario=PerfilDescuento())
 
     parada = plan.paradas[0]
     assert parada.candidata.estacion.rotulo == "CON_DESCUENTO"
@@ -557,15 +537,21 @@ def test_un_paso_mas_fino_nunca_sale_mas_caro(coche: Vehiculo) -> None:
     )
 
     fino = optimizar_repostaje(
-        coche, candidatas, distancias, duraciones,
+        coche,
+        candidatas,
+        distancias,
+        duraciones,
         parametros=ParametrosOptimizacion(paso_discretizacion_l=0.5),
     )
     grueso = optimizar_repostaje(
-        coche, candidatas, distancias, duraciones,
+        coche,
+        candidatas,
+        distancias,
+        duraciones,
         parametros=ParametrosOptimizacion(paso_discretizacion_l=5.0),
     )
 
-    assert fino.coste_total_eur <= grueso.coste_total_eur
+    assert fino.coste_combustible_eur <= grueso.coste_combustible_eur
 
 
 # ---------------------------------------------------------------------------
@@ -591,17 +577,17 @@ def test_el_plan_cuadra_consigo_mismo(coche: Vehiculo) -> None:
     assert plan.nivel_llegada_destino_l == pytest.approx(esperado, abs=1.0)
 
     assert plan.litros_repostados == pytest.approx(sum(p.litros for p in plan.paradas))
-    assert plan.coste_combustible_eur == sum(
-        (p.coste_eur for p in plan.paradas), Decimal(0)
-    )
+    assert plan.coste_combustible_eur == sum((p.coste_eur for p in plan.paradas), Decimal(0))
     assert plan.distancia_total_km == pytest.approx(sum(t.distancia_km for t in plan.tramos))
-    assert plan.duracion_total_s == pytest.approx(sum(t.duracion_s for t in plan.tramos))
+    # La duración del plan es conducir *más* repostar (§8.2).
+    conduccion = sum(t.duracion_s for t in plan.tramos)
+    assert plan.duracion_total_s == pytest.approx(conduccion + plan.numero_paradas * 300.0)
     assert plan.tramos[0].desde == "Origen"
     assert plan.tramos[-1].hasta == "Destino"
 
 
 def test_funciona_sin_matriz_de_duraciones(coche: Vehiculo) -> None:
-    """Sin duraciones el DP sigue resolviendo; solo se pierde el coste de desvío."""
+    """Sin duraciones el DP sigue resolviendo; solo se pierde el desempate por tiempo."""
     candidatas, distancias, _ = escenario(
         [EstacionEnRuta(pk_km=100, precio_milesimas=1500)], largo_km=300
     )
@@ -609,6 +595,5 @@ def test_funciona_sin_matriz_de_duraciones(coche: Vehiculo) -> None:
     plan = optimizar_repostaje(coche, candidatas, distancias)
 
     assert plan.numero_paradas == 1
-    assert plan.duracion_total_s == 0.0
-    # Queda el coste fijo por parada: 300 s a 15 EUR/h = 1,25 EUR.
-    assert plan.coste_tiempo_eur == Decimal("1.25")
+    # Sin conducción cronometrada solo queda el rato de repostar: una parada, 300 s.
+    assert plan.duracion_total_s == pytest.approx(300.0)

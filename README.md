@@ -1,8 +1,14 @@
 # Repostaje Fino
 
-Calcula **dónde repostar y cuánto** en un trayecto por carretera para minimizar el
-coste total del viaje, con precios reales de las gasolineras españolas (Geoportal de
-Carburantes del MITECO) y coste real del desvío.
+Calcula **dónde puedes parar a repostar y cuánto te cuesta cada opción** en un
+trayecto por carretera, con precios reales de las gasolineras españolas (Geoportal
+de Carburantes del MITECO) y desvíos reales por carretera.
+
+No da una sola respuesta: da el plan más barato y un abanico de paradas posibles
+repartidas por el viaje, cada una con lo que cuesta de más elegirla. Así se puede
+parar a la hora o a las tres sabiendo qué se pierde. **El tiempo se mide en
+minutos, nunca en euros**: una hora tuya no tiene precio de tarifa
+([§8.2](ARQUITECTURA.md)).
 
 > **Documento de referencia: [`ARQUITECTURA.md`](ARQUITECTURA.md).**
 > Es el documento vivo de decisiones técnicas y la fuente de verdad del proyecto
@@ -19,7 +25,9 @@ Siguiendo el orden de [`ARQUITECTURA.md` §12](ARQUITECTURA.md):
 - [x] Paso 3 — `osrm_adapter.py` (polilínea + `/table` por bloques, con reintentos)
 - [x] Paso 4 — API FastAPI (`POST /api/ruta-optima`)
 - [x] Paso 5 — frontend Leaflet, v1 mínima ([§13](ARQUITECTURA.md))
-- [ ] Paso 6 — filtro multi-combustible: `GET /api/estaciones` ([§6.3](ARQUITECTURA.md))
+- [x] Paso 6 — opciones y desvío acotado: fuera el precio de la hora
+      ([§8.2](ARQUITECTURA.md) y [§8.6](ARQUITECTURA.md))
+- [ ] Paso 7 — filtro multi-combustible: `GET /api/estaciones` ([§6.3](ARQUITECTURA.md))
 
 Con la app levantada, la interfaz está en <http://127.0.0.1:8000/>: la sirve el
 propio FastAPI, en el mismo origen que la API ([§9.1](ARQUITECTURA.md)).

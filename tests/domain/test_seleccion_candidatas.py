@@ -191,7 +191,7 @@ def test_el_filtro_de_marca_llega_al_store() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Depurar lo que OSRM no supo resolver (§8.4)
+# Depurar: lo que OSRM no supo resolver (§8.4) y lo que se desvía de más (§8.2)
 # ---------------------------------------------------------------------------
 
 
@@ -313,3 +313,86 @@ def test_puntos_para_la_matriz_respeta_el_convenio_del_dp() -> None:
 def test_peticiones_estimadas(puntos: int, esperado: int) -> None:
     """Sirve para saber si al usuario le vas a hacer esperar 3 s o 30."""
     assert peticiones_estimadas(puntos) == esperado
+
+
+# ---------------------------------------------------------------------------
+# El límite de desvío, que es lo que sustituye al precio de la hora (§8.2)
+# ---------------------------------------------------------------------------
+
+
+def test_el_desvio_se_mide_contra_la_ruta_directa() -> None:
+    """Ir por la estación menos ir de largo. Ni línea recta ni perpendiculares."""
+    candidatas = [candidata(1, -2.0)]
+    matriz = matriz_de(
+        [
+            [0, 110, 300],
+            [110, 0, 200],
+            [300, 200, 0],
+        ]
+    )
+
+    depurada = depurar_matriz(candidatas, matriz, max_desvio_km=20.0)
+
+    # 110 de ida + 200 de vuelta - 300 de largo = 10 km.
+    assert depurada.desvios[0].km == pytest.approx(10.0)
+    assert depurada.desvios[0].minutos == pytest.approx(6.0)
+
+
+def test_la_estacion_demasiado_desviada_no_llega_al_dp() -> None:
+    """La barata a la que hay que salirse 15 km no es una opción, por barata que sea."""
+    candidatas = [candidata(1, -2.0), candidata(2, -1.0)]
+    matriz = matriz_de(
+        [
+            [0, 130, 160, 300],
+            [130, 0, 40, 200],
+            [160, 40, 0, 145],
+            [300, 200, 145, 0],
+        ]
+    )
+
+    depurada = depurar_matriz(candidatas, matriz, max_desvio_km=10.0)
+
+    # La 1 desvía 30 km (130 + 200 - 300); la 2, 5 km (160 + 145 - 300).
+    assert [c.estacion.id for c in depurada.candidatas] == [2]
+    assert [c.estacion.id for c in depurada.descartadas_por_desvio] == [1]
+    assert depurada.descartadas == []
+
+
+def test_el_tope_en_minutos_caza_lo_que_los_kilometros_no_ven() -> None:
+    """Un kilómetro fuera de la vía, pero diez minutos por dentro del pueblo.
+
+    Es el caso del que avisa §8: en kilómetros no se nota y el combustible extra
+    no compensa el ahorro, así que con el objetivo en euros puros el DP se iría a
+    ella. Lo que la deja fuera es el tope de tiempo, no un precio de la hora.
+    """
+    candidatas = [candidata(1, -2.0)]
+    distancias = [
+        [0, 151, 300],
+        [151, 0, 150],
+        [300, 150, 0],
+    ]
+    matriz = MatrizRuta(
+        distancias_km=tuple(tuple(f) for f in distancias),
+        # Ir y volver del surtidor cuesta 10 minutos por sentido.
+        duraciones_s=(
+            (0, 151 * 36 + 600, 300 * 36),
+            (151 * 36 + 600, 0, 150 * 36 + 600),
+            (300 * 36, 150 * 36 + 600, 0),
+        ),
+        indices_sin_respuesta=(),
+    )
+
+    holgado = depurar_matriz(candidatas, matriz, max_desvio_km=10.0, max_desvio_min=60.0)
+    apretado = depurar_matriz(candidatas, matriz, max_desvio_km=10.0, max_desvio_min=15.0)
+
+    assert [c.estacion.id for c in holgado.candidatas] == [1]
+    assert apretado.candidatas == []
+    assert [c.estacion.id for c in apretado.descartadas_por_desvio] == [1]
+
+
+def test_el_corredor_se_ensancha_para_no_tirar_lo_que_el_filtro_fino_admitiria() -> None:
+    estrecho = ParametrosSeleccion(margen_km=5.0, max_desvio_km=10.0)
+    ancho = ParametrosSeleccion(margen_km=5.0, max_desvio_km=40.0)
+
+    assert estrecho.margen_efectivo_km == 5.0
+    assert ancho.margen_efectivo_km == 20.0, "un desvío de 40 km es 20 km de vía"

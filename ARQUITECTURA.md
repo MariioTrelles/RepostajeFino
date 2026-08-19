@@ -39,8 +39,10 @@ Comprobación antes de dar por bueno un intérprete:
 
 ```python
 import sqlite3
+
 sqlite3.connect(":memory:").execute(
-    "CREATE VIRTUAL TABLE t USING rtree(id, minx, maxx, miny, maxy)")
+    "CREATE VIRTUAL TABLE t USING rtree(id, minx, maxx, miny, maxy)"
+)
 ```
 
 Si eso falla, las alternativas son `pysqlite3-binary` o `apsw` (embeben su propio
@@ -156,6 +158,7 @@ Sin framework. Funciones factory en `api/dependencies.py`:
 @lru_cache(maxsize=1)
 def get_routing_provider() -> RoutingProvider:
     return OSRMAdapter(base_url=settings.osrm_url)
+
 
 @lru_cache(maxsize=1)
 def get_price_store() -> PriceStore:
@@ -303,18 +306,19 @@ primero que casa.
 NORMALIZACION_ROTULOS = {
     "REPSOL": ["REPSOL"],
     "PETRONOR": ["PETRONOR"],
-    "MOEVE": ["MOEVE", "CEPSA", "C E P S A"],   # ver nota abajo
+    "MOEVE": ["MOEVE", "CEPSA", "C E P S A"],  # ver nota abajo
     "GALP": ["GALP", "GALP&GO"],
     "SHELL": ["SHELL"],
     "BP": ["BP", "B P"],
     # ...hasta ~20 marcas; ver el módulo para la lista completa
 }
 
-_NO_ALFANUM = re.compile(r"[\W_]+")   # `\w` es unicode-aware: los acentos sobreviven
+_NO_ALFANUM = re.compile(r"[\W_]+")  # `\w` es unicode-aware: los acentos sobreviven
+
 
 def normalizar_rotulo(raw: str) -> str:
     limpio = _NO_ALFANUM.sub(" ", raw).strip().upper()
-    for canonico, patron in _PATRONES:       # patrón: (?<!\w)ALTERNATIVAS(?!\w)
+    for canonico, patron in _PATRONES:  # patrón: (?<!\w)ALTERNATIVAS(?!\w)
         if patron.search(limpio):
             return canonico
     return "INDEPENDIENTE"
@@ -497,7 +501,8 @@ un resultado vacío silencioso.
 ### 6.2. La API (decidido: un endpoint, coordenadas, plan + mapa en una llamada)
 
 `POST /api/ruta-optima`. Stateless (§3): el request lleva origen, destino y el
-`Vehiculo` completo, más los ajustes opcionales de §8.2 y el filtro de marca.
+`Vehiculo` completo, más los ajustes opcionales de §8.2 (`max_desvio_km`,
+`max_desvio_min`, `tiempo_parada_s`) y el filtro de marca.
 
 **Origen y destino son coordenadas, no texto** (decidido). Geocodificar en el
 servidor obligaría a un puerto y un adaptador que §3 no contempla, y a cargar con
@@ -508,11 +513,20 @@ Esto **no** significa que el usuario tenga que clicar en un mapa para decir
 "Madrid": el buscador de direcciones existe, vive en el navegador y está
 especificado en §13.2. Lo que decide esta sección es dónde *no* vive.
 
-**La respuesta trae el plan, la polilínea y las candidatas consideradas**
-(decidido) con su precio y su marca de vigencia (§4.2). El frontend pinta mapa y
-plan con una sola llamada, sin un segundo endpoint que repetiría el trabajo de
-OSRM. El coste va desglosado en combustible y tiempo, con el tiempo como exceso
-sobre la ruta directa (§8.2).
+**La respuesta trae el plan, las opciones, la polilínea y las candidatas
+consideradas** (decidido) con su precio, su desvío y su marca de vigencia (§4.2).
+El frontend pinta mapa, plan y opciones con una sola llamada, sin un segundo
+endpoint que repetiría el trabajo de OSRM.
+
+**Una sola cifra de dinero**, `coste_combustible_eur`, y son los euros del
+surtidor. No hay `coste_tiempo_eur` ni `coste_total_eur`: el tiempo va en minutos
+y como exceso sobre la ruta directa (§8.2). Cada opción lleva su `sobrecoste_eur`,
+que el usuario puede comprobar restando dos cifras que también ve.
+
+**El request rechaza campos que no conoce** (`extra="forbid"`). Un cliente que
+mandara `valor_tiempo_eur_h`, que existió hasta el paso 6, estaría esperando un
+comportamiento que ya no está; ignorárselo en silencio sería devolverle un plan
+que no es el que pidió, y esta API no hace eso (§8.4).
 
 **Los fallos no se disfrazan de plan**, cada uno con su código y sus números:
 
@@ -521,12 +535,16 @@ sobre la ruta directa (§8.2).
 | Conductor por debajo de la reserva (§7) | 422    | aviso + gasolineras más cercanas **al origen**    |
 | Trayecto inviable (§7)                 | 422    | el hueco concreto: entre qué dos puntos y cuántos km |
 | Ninguna candidata con precio vigente   | 422    | sugerencia de ensanchar el corredor o quitar filtros |
+| Todas las candidatas se desvían de más (§8.2) | 422 | sugerencia de subir `max_desvio_km`               |
 | OSRM agotó los reintentos (§8.4)       | 503    | el cálculo no está disponible ahora mismo          |
 | OSRM respondió pero mal                | 502    | el código de error que devolvió                    |
 
 Si OSRM resuelve unas candidatas y otras no, la petición **sale con 200 y un
 aviso** diciendo cuántas se quedaron fuera: es la degradación explícita de §8.4,
-ni un 500 ni un plan silenciosamente peor.
+ni un 500 ni un plan silenciosamente peor. Lo mismo con las que el límite de
+desvío deja fuera: son gasolineras que existen y que el usuario puede estar
+buscando en el mapa, así que se dice cuántas y por qué, en vez de que desaparezcan
+sin explicación.
 
 Este endpoint conoce **un solo** combustible, el del coche, así que el mapa no
 puede pintar otros desde aquí. Eso no es una carencia: es la tabla del principio
@@ -576,11 +594,11 @@ solo dónde.
 ```python
 @dataclass
 class Vehiculo:
-    consumo_l_100km: float      # o kWh/100km si se añaden eléctricos
-    tipo_combustible: str       # "gasolina95", "diesel"...
+    consumo_l_100km: float  # o kWh/100km si se añaden eléctricos
+    tipo_combustible: str  # "gasolina95", "diesel"...
     capacidad_deposito_l: float
     nivel_actual_l: float
-    reserva_minima_l: float = 5.0   # el DP nunca baja de aquí
+    reserva_minima_l: float = 5.0  # el DP nunca baja de aquí
 ```
 
 Implicaciones para el DP:
@@ -638,9 +656,9 @@ programación dinámica.
 2. **No usar distancia perpendicular a la polilínea** para estimar el desvío.
    Filtrar primero con R*Tree por bounding box, luego calcular el desvío real
    con el servicio `/table` de OSRM en batch.
-3. **Modelar el coste del desvío**: combustible + tiempo de ida y vuelta al
-   surtidor. Sin esto, el algoritmo manda al usuario 4 km fuera de la A-2 para
-   ahorrar 60 céntimos.
+3. **Acotar el desvío**: sin un límite, el algoritmo manda al usuario 4 km fuera
+   de la A-2 para ahorrar 60 céntimos. Se resuelve con una restricción dura antes
+   del DP, no poniéndole precio a la hora del conductor (§8.2).
 4. El DP vive en `domain/` y es testeable con datos falsos, sin BD ni red.
 
 Medido con la implementación actual: **250 candidatas en una ruta de 1.500 km se
@@ -653,48 +671,107 @@ y de esos el DP son milisegundos: **todo lo demás es esperar a OSRM**. Cualquie
 esfuerzo de optimización que no vaya dirigido a reducir peticiones a `/table`
 está mirando al sitio equivocado.
 
-### 8.1. Discretización del nivel de combustible (decidido: 1 litro)
+### 8.1. Discretización del nivel de combustible (decidido: 0,25 litros)
 
 El estado del DP es (estación, litros en el depósito al llegar). Como el nivel de
 combustible es continuo, hay que discretizarlo en pasos fijos para que el DP tenga
 un número finito de estados que tabular.
 
 ```python
-PASO_DISCRETIZACION_L = 1.0  # constante ajustable, solo afecta a rendimiento
+PASO_DISCRETIZACION_L = 0.25  # constante ajustable, pero no inocua: ver abajo
 ```
 
-Con depósitos típicos (40-70 L) esto da 40-70 estados por estación candidata,
-trivial computacionalmente. Es una constante de ajuste fino, no una decisión de
-diseño: si en el futuro el DP tarda más de lo razonable con rutas muy largas,
-se sube a 2-5 L sin tocar la lógica del algoritmo.
+Con depósitos típicos (40-70 L) esto da 160-280 estados por estación candidata,
+barato. Sigue siendo una constante de ajuste fino y no una decisión de diseño,
+pero **el valor importa más de lo que parece**, y por eso ya no es 1 L.
 
-### 8.2. Coste del desvío (decidido: €/hora + tiempo fijo por parada)
+El consumo de cada tramo se redondea *hacia arriba* (§8.3), así que el paso es
+también el error del plan. Medido en Madrid-Barcelona con 23 candidatas:
 
-El punto 3 de arriba dice *qué* hay que modelar pero no *cómo* valorar el tiempo
-en euros. Modelo elegido:
+| Paso | Coste del plan | Ruido entre opciones | DP completo |
+|------|----------------|----------------------|-------------|
+| 1 L | 26,89 € | hasta 1,70 € | ~90 ms |
+| 0,25 L | 25,67 € | ~0,4 € | ~490 ms |
+
+Con 1 L, dos gasolineras separadas por una milésima aparecían separadas por
+1,70 € en la lista de opciones (§8.6), solo porque a una le tocaba redondear un
+litro más. Es decir: el ruido de la discretización era **mayor que la señal que
+las opciones existen para enseñar**, y además el plan se encarecía 1,3 € sobre el
+papel. Con 0,25 L el ruido baja a ~0,4 € y el DP sigue costando medio segundo,
+que en una petición donde esperar a OSRM son dos segundos y medio no se nota.
+
+Si alguna vez hay que recortar tiempo, subirlo es legítimo, pero hay que mirar
+antes qué le hace a la comparación entre opciones.
+
+### 8.2. Coste del desvío (decidido: restricción dura, no precio de la hora)
+
+> **Esta sección se reescribió el 19/08/2026.** Antes decía que el coste era
+> `combustible + valor_tiempo_eur_h * tiempo`, con 15 €/h por defecto. Ver
+> "Decisiones revisadas" en §11 para el porqué del cambio.
+
+El punto 3 de arriba dice *qué* hay que modelar. La respuesta ya no pasa por
+ponerle precio a la hora del conductor:
 
 ```
-coste = combustible comprado
-      + valor_tiempo_eur_h * (exceso de tiempo sobre la ruta directa
-                              + tiempo_parada_s por cada repostaje)
+minimizar   euros de combustible comprado
+sujeto a    desvío de cada estación <= max_desvio_km  (y <= max_desvio_min)
+            el nivel nunca baja de la reserva
+desempate   menos tiempo total
 ```
 
-- `valor_tiempo_eur_h`, por defecto **15 €/h**: cuánto vale una hora del
-  conductor. Es el término que impide mandar a nadie fuera de la autovía por unos
-  céntimos. Subirlo si el usuario prefiere no parar.
-- `tiempo_parada_s`, por defecto **300 s**: entrar, repostar, pagar y salir, al
-  margen del desvío.
-- El **combustible** del desvío no necesita término propio: si la matriz lleva
-  distancias reales puerta a puerta (que es lo que devuelve `/table` de OSRM), ir
-  por una estación desviada ya cuesta más kilómetros que no ir.
+**Por qué no €/hora.** Una hora del conductor no cuesta dinero, y fijarle un
+precio era una decisión que nadie había tomado: quedaba enterrada en una
+constante y contaminaba la única cifra real del viaje, que son los euros que se
+pagan en el surtidor. Además producía un desglose que no significa nada
+("Tiempo: 1,25 €") y que el usuario no puede comprobar contra nada.
 
-Consecuencia práctica: **el DP necesita también una matriz de duraciones**, no
-solo de distancias. Sin ella el coste de desvío se reduce al fijo por parada, y
-el algoritmo vuelve a mandar al usuario 4 km fuera de la A-2 por 60 céntimos.
+**Qué lo sustituye.** Lo que impedía mandar a nadie 4 km fuera de la A-2 por 60
+céntimos era ese término de tiempo. Ahora lo impide el **límite de desvío**, que
+se aplica *antes* del DP, al elegir qué candidatas entran
+(`seleccion_candidatas.depurar_matriz`). El DP solo ve estaciones a las que ya
+merece la pena ir, y dentro de ese conjunto puede mandar el dinero sin producir
+disparates.
 
-Al presentar el resultado conviene desglosar combustible y tiempo, y expresar el
-tiempo como **exceso sobre la ruta directa**, no como valor del viaje entero: si
-no, el número no significa nada para el usuario.
+**Cómo se mide el desvío.** Contra la ruta directa, en kilómetros de conducción
+real de la matriz de OSRM:
+
+```
+desvio = d(origen -> estación) + d(estación -> destino) - d(origen -> destino)
+```
+
+Es un número **por estación**, no por plan, así que se calcula antes del DP, sirve
+de filtro y se puede enseñar en el mapa. Sigue sin usarse la distancia
+perpendicular a la polilínea (§8, punto 2).
+
+- `max_desvio_km`, por defecto **10 km**: son los kilómetros de más, ida y vuelta.
+  Una gasolinera a 5 km de la carretera son ~10 km de desvío. Es el mando que ve
+  y toca el usuario.
+- `max_desvio_min`, por defecto **15 min**: red de seguridad, no mando principal.
+  Cubre el caso que los kilómetros no distinguen: la gasolinera a un kilómetro de
+  la vía pero a diez minutos por dentro del pueblo. Sin este tope, con el objetivo
+  en euros puros el DP se iría a ella (hay un test que lo fija).
+- `tiempo_parada_s`, por defecto **300 s**: sobrevive, pero en la componente de
+  **tiempo**, jamás en la de dinero. Sigue evitando paradas gratuitas —dos
+  repostajes al mismo precio pierden contra uno— sin ponerle precio a nada.
+
+**Consecuencia que hay que aceptar**: con objetivo en euros puros y límite duro,
+el plan sí acepta 9 km de desvío para ahorrar unos céntimos, mientras 9 km esté
+dentro de lo admitido. Es coherente: dentro de lo aceptable manda el dinero. Y
+está compensado por diseño, porque si al conductor no le compensa ese desvío, la
+lista de opciones (§8.6) le ofrece la alternativa con la cifra exacta de lo que le
+cuesta. La decisión vuelve al usuario en vez de esconderse en una constante.
+
+**El desempate**, en `Coste`, es una tupla `(micro-euros, milisegundos)` que
+Python compara lexicográficamente: primero el dinero, y solo si empata, el tiempo.
+Que el tiempo esté en otra componente y no sumado es exactamente la diferencia
+entre "tu hora vale 15 €" y "entre dos planes que cuestan lo mismo, prefiero el
+más rápido". Lo segundo no le pone precio a nada. Todo entero, ningún float (§8.3).
+
+El DP sigue necesitando **la matriz de duraciones**, ahora para el desempate y
+para poder decirle al usuario los minutos. Sin ella el DP resuelve igual.
+
+Al presentar el resultado, el tiempo va **en minutos y solo en minutos**, y como
+exceso sobre la ruta directa: si no, el número no significa nada.
 
 ### 8.3. Aritmética: enteros, ningún float
 
@@ -798,6 +875,70 @@ aproximación, pero solo eso. Cuando llega la matriz ya se conoce el kilometraje
 real desde el origen, así que **se reordena con ese dato** en el mismo paso en
 que se descartan las que OSRM no resolvió.
 
+
+### 8.6. Opciones: dónde puede elegir parar el conductor (decidido: ventanas de conducción)
+
+El plan óptimo contesta "dónde repostar más barato". Es la respuesta correcta a
+una pregunta que casi nadie se hace así. La de verdad es: *"salgo a las ocho,
+¿paro a las nueve, a las diez o a las once?"*. Un plan cerrado no sirve para eso,
+y obliga al usuario a aceptar la parada que le toque o a no usar la herramienta.
+
+Así que la respuesta final no es un plan, es **un plan más un abanico de opciones**.
+
+**Qué es una opción.** "Mi próxima parada es esta": no se reposta antes, se
+reposta ahí, y a partir de ahí el plan vuelve a ser libre. Se intenta primero sin
+más paradas —repostar lo que haga falta y llegar—, que es lo que quiere decir el
+conductor al elegir dónde parar; si el depósito no da para tanto, se repite
+dejando repostar después, y la opción enseña esa segunda parada, que es justo lo
+que hay que saber antes de elegir.
+
+Esto no es un detalle: sin la restricción de "y sigue", el plan más barato que
+para en una gasolinera cara es **echar un litro** ahí y comprar de verdad cien
+kilómetros después. Es correcto y es inútil, porque nadie llama a eso parar.
+
+**Cuánto cuesta cada una.** `sobrecoste_eur` = euros de combustible del viaje
+entero parando ahí, menos los del plan óptimo. En euros, porque son euros, y
+comprobable a mano restando dos cifras que también se enseñan. Puede que ninguna
+opción valga cero: el plan óptimo es libre de repartir el repostaje en dos paradas
+y salir más barato que cualquier parada única. Por eso lo que se marca es **la más
+barata de las ofrecidas**, que es entre lo que el usuario elige de verdad.
+
+**Cómo se reparten.** Ventanas de ~45 min de conducción, la mejor de cada una.
+Da unas 3 opciones en un viaje de 2 h y unas 7 en uno de 5 h. Mismo argumento que
+el cupo por tramos de §8.5, aplicado al tiempo en vez de al espacio: las N más
+baratas pueden estar todas en el mismo tramo de cien kilómetros y no le sirven a
+quien quiere parar antes o después. Dos reglas de borde:
+
+- Si hay menos gasolineras viables que ventanas, se ofrecen todas: repartir solo
+  serviría para esconder alternativas que caben de sobra en la pantalla.
+- Las ventanas cubren hasta donde **de verdad se puede llegar**, no hasta el
+  destino. Si el depósito se acaba a las dos horas, ofrecer un hueco para las
+  cuatro sería ofrecer una decisión que no existe. Por lo mismo, un viaje largo
+  con el depósito casi vacío da pocas opciones, y eso es la verdad, no un fallo.
+- Si no hace falta repostar, no hay opciones. Comparar contra un plan que no
+  compra combustible daría sobrecostes que no significan nada.
+
+**Cómo se calcula sin que cueste un DP por candidata.** Tres pasadas para todas
+las candidatas a la vez:
+
+1. la de ida normal, que da el plan óptimo;
+2. la de ida **en ayunas** (prohibido repostar), que da con cuánto se llega a cada
+   estación sin haber repostado antes;
+3. la de **vuelta**, que da lo que cuesta seguir desde cada estación al destino.
+
+Pegando 2 y 3 por el nivel del depósito sale, en O(niveles) por candidata, el
+mejor plan cuya próxima parada es esa. Eso ordena las candidatas dentro de cada
+ventana; el plan completo solo se reconstruye para el puñado que se va a enseñar.
+La pieza que lo hace barato es la rama "ya he empezado a repostar" que
+`_repostar_en` calculaba desde siempre y tiraba a la basura.
+
+Medido con 23 candidatas: plan óptimo 95 ms, sobrecostes 206 ms, 8 planes de
+opción ~190 ms. Medio segundo de CPU en una petición donde esperar a OSRM son dos
+segundos y medio; el cuello de botella sigue siendo el de §8, punto 1.
+
+**Lo que deja preparado**: la parada de emergencia de §10 ("la más cercana sin
+desviarme mucho") necesitaba exactamente el desvío por estación que §8.2 introduce.
+
 ---
 
 ## 9. Escalado
@@ -843,7 +984,7 @@ Consecuencias de trabajar en local por ahora:
 
   ```python
   contexto = ssl.create_default_context()
-  contexto.set_ciphers("DEFAULT@SECLEVEL=1")   # el certificado se sigue verificando
+  contexto.set_ciphers("DEFAULT@SECLEVEL=1")  # el certificado se sigue verificando
   httpx.AsyncClient(verify=contexto)
   ```
 
@@ -937,6 +1078,10 @@ Cuando se necesiten **múltiples instancias de la API en máquinas distintas**
   - **No requiere arquitectura nueva**: reutiliza el índice R*Tree de `estaciones`
     y el `RoutingProvider` (`/table` de OSRM) que ya están previstos para el DP.
     Sería un endpoint nuevo y sencillo, no un puerto ni adaptador nuevos.
+  - **Ya tiene la pieza que le faltaba**: "sin desviarme mucho" necesitaba una
+    medida de desvío por estación, y §8.2 la introdujo (`Desvio`, calculado en
+    `seleccion_candidatas.desvio_de`). El endpoint de emergencia sería el mismo
+    filtro aplicado a la posición actual en vez de a la ruta entera.
   - **Sí requiere algo que hoy no está previsto**: geolocalización del usuario en
     tiempo real desde el frontend (hoy solo se contempla origen/destino fijos).
   - El filtro "con baño" no tiene fuente de datos disponible en el Geoportal ni
@@ -957,10 +1102,15 @@ Cuando se necesiten **múltiples instancias de la API en máquinas distintas**
 - [x] **Normalización de rótulos**: diccionario manual (ver sección 4.1)
 - [x] **Persistencia de usuario**: stateless, sin perfiles guardados por ahora
 - [x] **Frecuencia de ingesta**: 2 veces al día
-- [x] **Paso de discretización del DP**: 1 litro (ver sección 8.1)
+- [x] **Paso de discretización del DP**: 0,25 litros (ver sección 8.1)
 - [x] **Versión de Python**: >= 3.12, por el módulo R*Tree (ver §2)
-- [x] **Coste del desvío**: €/hora sobre el exceso de tiempo + tiempo fijo por
-      parada; 15 €/h y 300 s por defecto (ver §8.2)
+- [x] **Coste del desvío**: restricción dura de desvío (10 km y 15 min por
+      defecto) con el objetivo en euros de combustible; el tiempo no se cobra
+      (ver §8.2)
+- [x] **Opciones al usuario**: no un plan cerrado sino un abanico repartido por
+      ventanas de ~45 min, con el sobrecoste en euros de cada una (ver §8.6)
+- [x] **Qué es una opción**: "mi próxima parada es esta", repostando lo que haga
+      falta para llegar; no "echa un litro aquí" (ver §8.6)
 - [x] **Aritmética del DP**: enteros en micro-euros, ningún float (ver §8.3)
 - [x] **Matcher de rótulos**: por palabra completa, no por substring (ver §4.1)
 - [x] **Cepsa y Moeve**: agrupadas bajo `MOEVE` (ver §4.1)
@@ -1004,6 +1154,29 @@ Cuando se necesiten **múltiples instancias de la API en máquinas distintas**
       Nominatim descartado por su política y CartoCiudad por no servir para texto
       a medias. El servidor sigue sin geocodificar (ver §13.2)
 
+### Revisadas
+
+Decisiones que estuvieron cerradas y se reabrieron. Se dejan escritas con su
+motivo: si no, dentro de un año alguien las vuelve a tomar como estaban.
+
+- **Coste del desvío: de €/hora a restricción dura** (19/08/2026). Estaba cerrado
+  como "15 €/h sobre el exceso de tiempo + 300 s por parada". Se cambió por dos
+  motivos. El primero, que ponerle precio a la hora del conductor es una decisión
+  que nadie había tomado, quedaba enterrada en una constante y ensuciaba la única
+  cifra real del viaje —lo que se paga en el surtidor— con un "coste de tiempo"
+  que el usuario no puede comprobar contra nada. El segundo, que un plan cerrado
+  no contesta la pregunta que se hace de verdad quien conduce, que es *cuándo*
+  parar; para poder ofrecerle varias opciones y decirle lo que cuesta cada una
+  hacía falta que "cuesta" significase euros y nada más. Lo que el término de
+  tiempo protegía —no mandar a nadie fuera de la autovía por céntimos— lo protege
+  ahora el límite de desvío, que además el usuario ve y puede tocar. Ver §8.2.
+
+- **Paso de discretización: de 1 L a 0,25 L** (19/08/2026). Era "constante de
+  ajuste fino, solo afecta a rendimiento", y dejó de serlo al aparecer las
+  opciones (§8.6): con 1 L el ruido de redondeo entre dos opciones llegaba a
+  1,70 €, más que las diferencias de precio que la lista existe para enseñar, y
+  el plan se encarecía 1,3 € sobre el papel. Ver §8.1.
+
 ### Pendientes
 
 Ninguna abierta. Lo que queda fuera del alcance de hoy no es una decisión sin
@@ -1025,12 +1198,16 @@ sus disparadores (§9) e ideas de futuro (§10).
    bloques por el límite de 100 coordenadas, con reintentos y sin fallback (§8.4).
 4. ✅ **API FastAPI**: un solo endpoint de ruta óptima que une las tres piezas
    (§6.2), más la selección de candidatas que las pega (§8.5).
-5. **Frontend Leaflet** (§13): v1 mínima —mapa, formulario, plan y pantallas de
+5. ✅ **Frontend Leaflet** (§13): v1 mínima —mapa, formulario, plan y pantallas de
    error— servida por la propia app en la raíz, sin CORS (§9.1), con buscador de
    direcciones Photon en el cliente (§13.2).
-6. **Filtro multi-combustible**: `GET /api/estaciones` (§6.3) y los controles de
-   producto y marca sobre el mapa. Va después del 5 a propósito: el paso 5 ya
-   tiene bastantes piezas nuevas a la vez.
+6. ✅ **Opciones y desvío acotado** (§8.2 y §8.6): fuera el precio de la hora, la
+   respuesta pasa de un plan cerrado a un abanico de paradas posibles con su
+   sobrecoste en euros. Tocó dominio, API y frontend a la vez porque el cambio es
+   del modelo, no de la presentación.
+7. **Filtro multi-combustible**: `GET /api/estaciones` (§6.3) y los controles de
+   producto y marca sobre el mapa. Va al final a propósito: es lo único que queda
+   que no cambia el modelo, solo añade visualización.
 
 El paso 2 antes del 3 es deliberado: si el DP depende de OSRM para poder probarse,
 pierdes la ventaja principal de haber elegido hexagonal. Visto en retrospectiva,
@@ -1039,7 +1216,7 @@ distancia puede ser `inf`.
 
 ---
 
-## 13. Frontend (paso 5)
+## 13. Frontend (pasos 5 y 6)
 
 ### 13.1. Alcance y forma (decidido: v1 mínima, una pantalla, sin build)
 
@@ -1067,7 +1244,7 @@ app/static/
 ├── api.js          # fetch + traducción de los errores tipados de §6.2
 ├── geocoder.js     # buscar(texto, cerca) -> [{etiqueta, lat, lon}] — §13.2
 ├── mapa.js         # Leaflet: polilínea, capas, marcadores, popups
-├── panel.js        # formulario, buscador y plan
+├── panel.js        # formulario, buscador, plan y opciones
 ├── formato.js      # euros, litros, km y duraciones; lo comparten panel y mapa
 ├── estilos.css
 └── vendor/leaflet/ # 1.9.4, con sus imágenes
@@ -1144,10 +1321,12 @@ usuario, sería complicarse por adelantado.
 
 ### 13.3. Mapa, espera y fallos
 
-**El mapa pinta tres capas**: la polilínea de la ruta directa; las candidatas
+**El mapa pinta cuatro capas**: la polilínea de la ruta directa; las candidatas
 como círculos pequeños coloreados por precio efectivo, en gris las no vigentes
-(§4.2 pide marcar lo caducado, no ocultarlo); y las paradas como marcador
-numerado, con popup de litros, €/L efectivo, coste y nivel de llegada y salida.
+(§4.2 pide marcar lo caducado, no ocultarlo); las **opciones** (§8.6) como anillo,
+sin número —no son un orden que seguir sino alternativas entre las que elegir—; y
+las paradas del plan como marcador numerado, con popup de litros, €/L efectivo,
+coste y nivel de llegada y salida.
 
 **La escala de precio es secuencial de un solo tono** (azul claro → oscuro por
 cuantiles), no el verde-rojo que pide el instinto: el precio es una magnitud, no
@@ -1156,9 +1335,19 @@ paso más claro está elegido para seguir viéndose sobre el color de los tiles 
 OSM, que es más oscuro que un fondo blanco. **El precio caducado no se distingue
 solo por el color**: va además sin relleno y con el borde discontinuo.
 
-**El plan** lista las paradas con su kilómetro y desglosa el coste en combustible
-y tiempo, con el tiempo como **exceso sobre la ruta directa** — §8.2 es explícita
-en que el total del viaje no significa nada para el usuario.
+**El plan** lista las paradas con su kilómetro y enseña **una sola cifra de
+dinero**: los euros de combustible. Debajo va la lista de opciones, en el orden en
+que el conductor se las cruza, cada una con la hora aproximada, el desvío en km y
+minutos, y el sobrecoste en euros. Pinchar una la enseña en el mapa: elegir dónde
+parar es a lo que se ha venido, así que tiene que costar un clic.
+
+El tiempo aparece **solo en minutos** y como exceso sobre la ruta directa — §8.2
+es explícita en que ni el total del viaje ni un "coste de tiempo" en euros
+significan nada para el usuario.
+
+**En los ajustes hay un mando nuevo y falta el de antes**: entra "Desvío máximo"
+en kilómetros (§8.2) y desaparece "Valor del tiempo €/h", que era la cara visible
+de la decisión que el paso 6 revirtió.
 
 **La espera es parte del diseño, no un spinner mudo.** Una petición va de 1,5 s a
 casi medio minuto según `max_candidatas` (§8.5), así que hay barra de progreso y

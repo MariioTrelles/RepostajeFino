@@ -22,7 +22,7 @@ from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.adapters.ingestion.productos import (
     CODIGOS_PRODUCTO,
@@ -32,6 +32,7 @@ from app.adapters.ingestion.productos import (
 from app.adapters.ingestion.rotulo_normalizer import MARCAS_FILTRABLES
 from app.adapters.routing.osrm_adapter import ErrorOSRM, RoutingNoDisponible
 from app.api.dependencies import get_price_store, get_routing_provider
+from app.domain import opciones as dominio_opciones
 from app.domain import seleccion_candidatas as seleccion
 from app.domain.dp_optimizer import (
     ParametrosOptimizacion,
@@ -39,7 +40,15 @@ from app.domain.dp_optimizer import (
     VehiculoInvalido,
     optimizar_repostaje,
 )
-from app.domain.models import Estacion, EstacionCandidata, Parada, Precio, Vehiculo
+from app.domain.models import (
+    Desvio,
+    Estacion,
+    EstacionCandidata,
+    Opcion,
+    Parada,
+    Precio,
+    Vehiculo,
+)
 from app.domain.ports.price_store import PriceStore
 from app.domain.ports.routing_provider import Coordenada, RoutingProvider
 from app.domain.precio_efectivo import precio_efectivo
@@ -106,6 +115,11 @@ class VehiculoIn(BaseModel):
 
 
 class RutaOptimaRequest(BaseModel):
+    # Un campo que ya no existe (``valor_tiempo_eur_h``, §8.2) se rechaza en vez
+    # de ignorarse: quien lo mandara estaría esperando un comportamiento que ya no
+    # está, y callárselo sería devolverle un plan que no es el que pidió (§8.4).
+    model_config = ConfigDict(extra="forbid")
+
     origen: CoordenadaIn
     destino: CoordenadaIn
     vehiculo: VehiculoIn
@@ -116,8 +130,37 @@ class RutaOptimaRequest(BaseModel):
             "`INDEPENDIENTE` no es una opción filtrable (§6)."
         ),
     )
-    valor_tiempo_eur_h: float = Field(default=15.0, ge=0, le=500)
-    tiempo_parada_s: float = Field(default=300.0, ge=0, le=7200)
+    tiempo_parada_s: float = Field(
+        default=300.0,
+        ge=0,
+        le=7200,
+        description=(
+            "Lo que se tarda en repostar. No se convierte a euros (§8.2): sirve "
+            "para desempatar planes que cuestan lo mismo y para el tiempo que se "
+            "informa en minutos."
+        ),
+    )
+    max_desvio_km: float = Field(
+        default=10.0,
+        gt=0,
+        le=50,
+        description=(
+            "Kilómetros extra de conducción que se admiten por pasar por una "
+            "gasolinera, ida y vuelta. Una estación a 5 km de la carretera son "
+            "unos 10 km de desvío. Es el límite que hace viable o inviable una "
+            "opción (§8.2)."
+        ),
+    )
+    max_desvio_min: float = Field(
+        default=15.0,
+        gt=0,
+        le=60,
+        description=(
+            "Red de seguridad para la gasolinera que está a un kilómetro de la "
+            "vía pero a diez minutos por dentro del pueblo, que los kilómetros "
+            "por sí solos no distinguen."
+        ),
+    )
     max_candidatas: int = Field(default=50, ge=2, le=250)
     margen_corredor_km: float = Field(default=5.0, gt=0, le=50)
 
@@ -184,14 +227,18 @@ class CandidataOut(BaseModel):
     estacion: EstacionOut
     precio: PrecioOut
     precio_efectivo_eur_litro: float
+    desvio_km: float
+    desvio_min: float
 
     @classmethod
-    def de(cls, candidata: EstacionCandidata, ahora: datetime) -> CandidataOut:
+    def de(cls, candidata: EstacionCandidata, desvio: Desvio, ahora: datetime) -> CandidataOut:
         efectivo = precio_efectivo(candidata.estacion, candidata.precio_milesimas)
         return cls(
             estacion=EstacionOut.de(candidata.estacion),
             precio=PrecioOut.de(candidata.precio, ahora),
             precio_efectivo_eur_litro=efectivo / 1000,
+            desvio_km=round(desvio.km, 1),
+            desvio_min=round(desvio.minutos),
         )
 
 
@@ -226,8 +273,50 @@ class TramoOut(BaseModel):
     nivel_llegada_l: float
 
 
+class OpcionOut(BaseModel):
+    """Una gasolinera donde el conductor puede elegir parar, con lo que le cuesta.
+
+    ``sobrecoste_eur`` son euros de combustible del viaje entero respecto al plan
+    óptimo. El tiempo va en minutos y solo en minutos (§8.2).
+
+    Puede que ninguna opción tenga sobrecoste cero: el plan óptimo es libre de
+    repartir el repostaje en dos paradas y salir más barato que cualquier parada
+    única. ``es_la_mas_barata`` marca la mejor de las ofrecidas.
+    """
+
+    estacion: EstacionOut
+    precio: PrecioOut
+    precio_efectivo_eur_litro: float
+    km_desde_origen: float
+    tiempo_desde_origen_s: float
+    desvio_km: float
+    desvio_min: float
+    litros: float
+    coste_viaje_eur: float
+    sobrecoste_eur: float
+    paradas: list[ParadaOut]
+    es_la_mas_barata: bool
+
+    @classmethod
+    def de(cls, opcion: Opcion, ahora: datetime) -> OpcionOut:
+        return cls(
+            estacion=EstacionOut.de(opcion.estacion),
+            precio=PrecioOut.de(opcion.candidata.precio, ahora),
+            precio_efectivo_eur_litro=opcion.precio_efectivo_milesimas / 1000,
+            km_desde_origen=round(opcion.km_desde_origen, 1),
+            tiempo_desde_origen_s=round(opcion.tiempo_desde_origen_s),
+            desvio_km=round(opcion.desvio.km, 1),
+            desvio_min=round(opcion.desvio.minutos),
+            litros=round(opcion.litros, 2),
+            coste_viaje_eur=_euros(opcion.coste_viaje_eur),
+            sobrecoste_eur=_euros(opcion.sobrecoste_eur),
+            paradas=[ParadaOut.de(p) for p in opcion.plan.paradas],
+            es_la_mas_barata=opcion.es_la_mas_barata,
+        )
+
+
 class RutaOptimaResponse(BaseModel):
-    """El plan, más lo que el mapa necesita para pintarse de una sola llamada."""
+    """El plan, las opciones y lo que el mapa necesita, en una sola llamada."""
 
     distancia_directa_km: float
     duracion_directa_s: float
@@ -236,9 +325,13 @@ class RutaOptimaResponse(BaseModel):
     )
     paradas: list[ParadaOut]
     tramos: list[TramoOut]
+    opciones: list[OpcionOut] = Field(
+        description=(
+            "Dónde puede elegir parar el conductor, en el orden en que se las "
+            "cruza, cada una con lo que le cuesta de más que el plan óptimo."
+        )
+    )
     coste_combustible_eur: float
-    coste_tiempo_eur: float
-    coste_total_eur: float
     litros_repostados: float
     distancia_total_km: float
     duracion_total_s: float
@@ -305,6 +398,7 @@ async def ruta_optima(
     parametros_seleccion = seleccion.ParametrosSeleccion(
         margen_km=peticion.margen_corredor_km,
         max_candidatas=peticion.max_candidatas,
+        max_desvio_km=peticion.max_desvio_km,
     )
     # SQLite es síncrono: fuera del hilo del bucle de eventos.
     candidatas = await asyncio.to_thread(
@@ -337,11 +431,14 @@ async def ruta_optima(
     matriz = await _con_osrm(routing.matriz(puntos))
 
     try:
-        depurada = seleccion.depurar_matriz(candidatas, matriz)
+        depurada = seleccion.depurar_matriz(
+            candidatas,
+            matriz,
+            max_desvio_km=peticion.max_desvio_km,
+            max_desvio_min=peticion.max_desvio_min,
+        )
     except seleccion.ExtremosSinRuta as error:
-        raise HTTPException(
-            status_code=HTTP_NO_PROCESABLE, detail=str(error)
-        ) from error
+        raise HTTPException(status_code=HTTP_NO_PROCESABLE, detail=str(error)) from error
 
     avisos: list[str] = []
     if depurada.descartadas:
@@ -351,22 +448,49 @@ async def ruta_optima(
             f"{len(depurada.descartadas)} estaciones se han descartado porque OSRM no "
             "supo calcular la ruta hasta ellas."
         )
+    if depurada.descartadas_por_desvio:
+        # No desaparecen sin explicación: son estaciones que existen y que el
+        # usuario podría estar buscando en el mapa (§8.4).
+        avisos.append(
+            f"{len(depurada.descartadas_por_desvio)} estaciones se han dejado fuera "
+            f"porque desviarse hasta ellas pasa de {peticion.max_desvio_km:g} km o de "
+            f"{peticion.max_desvio_min:g} min."
+        )
     if not depurada.candidatas:
+        if depurada.descartadas_por_desvio:
+            raise HTTPException(
+                status_code=HTTP_NO_PROCESABLE,
+                detail=(
+                    f"Ninguna de las {len(depurada.descartadas_por_desvio)} estaciones "
+                    "del corredor está a un desvío admisible. Prueba a subir "
+                    "`max_desvio_km`."
+                ),
+            )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="OSRM no ha sabido resolver ninguna de las estaciones candidatas.",
         )
 
+    parametros_dp = ParametrosOptimizacion(tiempo_parada_s=peticion.tiempo_parada_s)
     try:
         plan = optimizar_repostaje(
             vehiculo,
             depurada.candidatas,
             depurada.distancias_km,
             depurada.duraciones_s,
-            ParametrosOptimizacion(
-                valor_tiempo_eur_h=peticion.valor_tiempo_eur_h,
-                tiempo_parada_s=peticion.tiempo_parada_s,
-            ),
+            parametros_dp,
+        )
+        # El DP es de milisegundos, pero son varias pasadas y SQLite ya nos ha
+        # enseñado a no bloquear el bucle de eventos sin necesidad.
+        opciones = await asyncio.to_thread(
+            dominio_opciones.calcular,
+            vehiculo,
+            depurada.candidatas,
+            depurada.desvios,
+            depurada.distancias_km,
+            depurada.duraciones_s,
+            plan,
+            parametros_dp,
         )
     except TrayectoInviable as error:
         raise HTTPException(
@@ -374,15 +498,14 @@ async def ruta_optima(
             detail=_inviable(error).model_dump(mode="json"),
         ) from error
     except VehiculoInvalido as error:
-        raise HTTPException(
-            status_code=HTTP_NO_PROCESABLE, detail=str(error)
-        ) from error
+        raise HTTPException(status_code=HTTP_NO_PROCESABLE, detail=str(error)) from error
 
     return RutaOptimaResponse(
         distancia_directa_km=round(ruta.distancia_km, 1),
         duracion_directa_s=round(ruta.duracion_s),
         geometria=[(p.lat, p.lon) for p in ruta.geometria],
         paradas=[ParadaOut.de(p) for p in plan.paradas],
+        opciones=[OpcionOut.de(o, ahora) for o in opciones],
         tramos=[
             TramoOut(
                 desde=t.desde,
@@ -395,15 +518,16 @@ async def ruta_optima(
             for t in plan.tramos
         ],
         coste_combustible_eur=_euros(plan.coste_combustible_eur),
-        coste_tiempo_eur=_euros(plan.coste_tiempo_eur),
-        coste_total_eur=_euros(plan.coste_total_eur),
         litros_repostados=round(plan.litros_repostados, 2),
         distancia_total_km=round(plan.distancia_total_km, 1),
         duracion_total_s=round(plan.duracion_total_s),
         desvio_km=round(plan.desvio_km, 1),
         desvio_s=round(plan.desvio_s),
         nivel_llegada_destino_l=round(plan.nivel_llegada_destino_l, 2),
-        candidatas=[CandidataOut.de(c, ahora) for c in depurada.candidatas],
+        candidatas=[
+            CandidataOut.de(c, d, ahora)
+            for c, d in zip(depurada.candidatas, depurada.desvios, strict=True)
+        ],
         avisos=avisos,
     )
 
@@ -456,17 +580,13 @@ async def _con_osrm(espera):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)
         ) from error
     except ErrorOSRM as error:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)
-        ) from error
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error)) from error
 
 
 def _bajo_reserva(
     store: PriceStore, origen: Coordenada, vehiculo: Vehiculo, ahora: datetime
 ) -> HTTPException:
-    cercanas = seleccion.estaciones_cercanas(
-        store, origen, vehiculo.tipo_combustible, ahora=ahora
-    )
+    cercanas = seleccion.estaciones_cercanas(store, origen, vehiculo.tipo_combustible, ahora=ahora)
     cuerpo = BajoReservaOut(
         detalle=(
             f"El nivel actual ({vehiculo.nivel_actual_l:g} L) está por debajo de la "
@@ -484,9 +604,7 @@ def _bajo_reserva(
     )
     # `mode="json"` no es cosmético: el cuerpo lleva un `datetime` y HTTPException
     # no pasa por el serializador de Pydantic.
-    return HTTPException(
-        status_code=HTTP_NO_PROCESABLE, detail=cuerpo.model_dump(mode="json")
-    )
+    return HTTPException(status_code=HTTP_NO_PROCESABLE, detail=cuerpo.model_dump(mode="json"))
 
 
 def _inviable(error: TrayectoInviable) -> TrayectoInviableOut:

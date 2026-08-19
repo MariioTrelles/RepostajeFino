@@ -92,6 +92,14 @@ function actualizarArmado() {
 }
 
 document.querySelector("#panel").addEventListener("click", (evento) => {
+  // Elegir dónde parar es lo que el usuario ha venido a hacer: que pinchar una
+  // opción de la lista la enseñe en el mapa (§8.6).
+  const opcion = evento.target.closest(".opcion");
+  if (opcion) {
+    mapa.enfocarOpcion(Number(opcion.dataset.estacion));
+    return;
+  }
+
   const boton = evento.target.closest("button");
   if (!boton) return;
 

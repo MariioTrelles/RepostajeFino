@@ -178,8 +178,8 @@ export function leerFormulario() {
     // Sin marcas marcadas se manda `null`, que es "todas, independientes
     // incluidas" (§6). Una lista vacía sería otra cosa.
     rotulos: rotulos.length > 0 ? rotulos : null,
-    valor_tiempo_eur_h: numero("#valor-tiempo"),
     tiempo_parada_s: numero("#tiempo-parada"),
+    max_desvio_km: numero("#max-desvio"),
     max_candidatas: numero("#max-candidatas"),
     margen_corredor_km: numero("#margen-corredor"),
   };
@@ -193,7 +193,7 @@ export function escribirFormulario(guardado) {
   asignar("#capacidad", vehiculo.capacidad_deposito_l);
   asignar("#nivel", vehiculo.nivel_actual_l);
   asignar("#reserva", vehiculo.reserva_minima_l);
-  asignar("#valor-tiempo", ajustes.valor_tiempo_eur_h);
+  asignar("#max-desvio", ajustes.max_desvio_km);
   asignar("#tiempo-parada", ajustes.tiempo_parada_s);
   asignar("#max-candidatas", ajustes.max_candidatas);
   asignar("#margen-corredor", ajustes.margen_corredor_km);
@@ -220,25 +220,72 @@ export function pintarResultado(datos) {
   $("#vista-resultado").innerHTML = `
     ${avisos}
     <div class="cifra">
-      <span class="cifra-valor">${euros(datos.coste_total_eur)}</span>
-      <span class="cifra-etiqueta">coste total del viaje</span>
+      <span class="cifra-valor">${euros(datos.coste_combustible_eur)}</span>
+      <span class="cifra-etiqueta">combustible del viaje</span>
     </div>
     <dl class="fila-datos">
-      <div><dt>Combustible</dt><dd>${euros(datos.coste_combustible_eur)}</dd></div>
-      <div><dt>Tiempo</dt><dd>${euros(datos.coste_tiempo_eur)}</dd></div>
       <div><dt>Repostado</dt><dd>${litros(datos.litros_repostados)}</dd></div>
+      <div><dt>Paradas</dt><dd>${datos.paradas.length}</dd></div>
+      <div><dt>Llegas con</dt><dd>${litros(datos.nivel_llegada_destino_l)}</dd></div>
     </dl>
     <p class="apunte">
       ${km(datos.distancia_total_km)} en ${duracion(datos.duracion_total_s)}.
-      El desvío añade <strong>${km(datos.desvio_km)}</strong> y
-      <strong>${duracion(datos.desvio_s)}</strong> sobre la ruta directa
-      (${km(datos.distancia_directa_km)}). Llegas al destino con
-      ${litros(datos.nivel_llegada_destino_l)}.
+      Parar a repostar te cuesta <strong>${duracion(datos.desvio_s)}</strong> y
+      <strong>${km(datos.desvio_km)}</strong> más que ir de largo
+      (${km(datos.distancia_directa_km)}).
     </p>
     ${listaParadas(datos)}
+    ${listaOpciones(datos)}
     ${leyenda(datos.candidatas.length)}
     <button type="button" class="secundario" id="volver">Cambiar los datos</button>
   `;
+}
+
+/** Las opciones son la respuesta a "¿y si prefiero parar antes?" (§8.6). */
+function listaOpciones(datos) {
+  const opciones = datos.opciones ?? [];
+  if (opciones.length === 0) return "";
+
+  const filas = opciones
+    .map((opcion) => {
+      const extra =
+        opcion.sobrecoste_eur > 0
+          ? `<span class="opcion-sobrecoste">+${euros(opcion.sobrecoste_eur)}</span>`
+          : `<span class="opcion-sobrecoste opcion-mejor">la más barata</span>`;
+      const desvio =
+        opcion.desvio_km > 0
+          ? `+${km(opcion.desvio_km)} y +${opcion.desvio_min} min de desvío`
+          : "sin desvío";
+      const otras =
+        opcion.paradas.length > 1
+          ? ` · y otra parada más adelante`
+          : "";
+      return `
+      <li class="opcion${opcion.es_la_mas_barata ? " opcion-optima" : ""}"
+          data-estacion="${opcion.estacion.id}">
+        <p class="opcion-cabecera">
+          <span class="opcion-hora">${duracion(opcion.tiempo_desde_origen_s)}</span>
+          <span class="opcion-rotulo">${escapar(opcion.estacion.rotulo)}</span>
+          ${extra}
+        </p>
+        <p class="parada-lugar">${escapar(
+          [opcion.estacion.direccion, opcion.estacion.municipio].filter(Boolean).join(", "),
+        )}</p>
+        <p class="parada-detalle">
+          ${litros(opcion.litros)} a ${eurosLitro(opcion.precio_efectivo_eur_litro)} ·
+          km ${Math.round(opcion.km_desde_origen)} · ${desvio}${otras}
+        </p>
+      </li>`;
+    })
+    .join("");
+
+  return `
+    <h2 class="titulo-seccion">Dónde puedes parar</h2>
+    <p class="apunte">
+      El sobrecoste es lo que te cuesta de más el viaje entero si repostas ahí en vez
+      de en la más barata. El tiempo va en minutos: una hora tuya no vale euros.
+    </p>
+    <ul class="opciones">${filas}</ul>`;
 }
 
 function listaParadas(datos) {

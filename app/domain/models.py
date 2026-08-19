@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import NamedTuple
 
 # Un precio se considera vigente si su ``valid_from`` cae dentro de esta ventana
 # (ARQUITECTURA.md §4.2). Ninguna API garantiza que una estación siga reportando:
@@ -139,6 +140,32 @@ class EstacionCandidata:
         return self.precio.euros_por_litro
 
 
+class Desvio(NamedTuple):
+    """Lo que cuesta pasar por una estación en vez de seguir de largo.
+
+    Se mide **contra la ruta directa**, no contra el plan:
+
+        desvio = d(origen -> estación) + d(estación -> destino) - d(origen -> destino)
+
+    Así es un número por estación, no por plan: se puede calcular antes del DP,
+    usarse como filtro de viabilidad y enseñarse en el mapa. Con dos paradas la
+    suma de los desvíos individuales no es exactamente el desvío del plan (la
+    geometría no es aditiva), pero para rutas cuasi-lineales la diferencia es
+    despreciable, y el desvío real del plan se sigue midiendo aparte en
+    ``Recomendacion.desvio_km`` (ARQUITECTURA.md §8.2).
+
+    Son kilómetros y segundos de **conducción real**, de la matriz de OSRM, nunca
+    distancia perpendicular a la polilínea (§8, punto 2).
+    """
+
+    km: float
+    segundos: float
+
+    @property
+    def minutos(self) -> float:
+        return self.segundos / 60.0
+
+
 @dataclass(frozen=True, slots=True)
 class TramoRuta:
     """Un tramo del plan: de un punto al siguiente, sin paradas intermedias."""
@@ -178,15 +205,19 @@ class Parada:
 class Recomendacion:
     """El plan de repostaje: qué hacer y cuánto cuesta.
 
-    Los costes van desglosados a propósito. ``coste_tiempo_eur`` es el **exceso**
-    sobre la ruta directa (desvíos + tiempo de las paradas), no el valor del
-    viaje entero: si no, el número no significa nada para el usuario.
+    **Solo hay una cifra de dinero**, ``coste_combustible_eur``, y son los euros
+    que se pagan en el surtidor. El tiempo del conductor no se convierte a euros
+    (ARQUITECTURA.md §8.2): el desvío se controla con un límite de viabilidad, y
+    lo que el viaje cuesta *de tiempo* se dice en minutos, que es la unidad en la
+    que el usuario lo entiende y la única en la que el dato es real.
+
+    ``desvio_km`` y ``desvio_s`` son el **exceso** del plan entero sobre la ruta
+    directa, no el viaje completo: si no, el número no significa nada.
     """
 
     paradas: list[Parada] = field(default_factory=list)
     tramos: list[TramoRuta] = field(default_factory=list)
     coste_combustible_eur: Decimal = Decimal(0)
-    coste_tiempo_eur: Decimal = Decimal(0)
     litros_repostados: float = 0.0
     distancia_total_km: float = 0.0
     duracion_total_s: float = 0.0
@@ -195,9 +226,47 @@ class Recomendacion:
     nivel_llegada_destino_l: float = 0.0
 
     @property
-    def coste_total_eur(self) -> Decimal:
-        return self.coste_combustible_eur + self.coste_tiempo_eur
-
-    @property
     def numero_paradas(self) -> int:
         return len(self.paradas)
+
+
+@dataclass(frozen=True, slots=True)
+class Opcion:
+    """Una gasolinera donde el conductor *puede* parar, con lo que le cuesta.
+
+    El plan óptimo responde "dónde repostar más barato". Esto responde otra
+    pregunta, que es la que de verdad se hace el conductor: "¿y si prefiero parar
+    a las dos horas en vez de a las tres, cuánto me cuesta esa comodidad?"
+    (ARQUITECTURA.md §8.6).
+
+    ``sobrecoste_eur`` es esa respuesta: euros de combustible del **viaje entero**
+    parando aquí, menos los del plan óptimo. Nunca negativo, y comprobable a mano
+    restando dos números que también se le enseñan.
+
+    Ojo: no tiene por qué ser cero en ninguna opción. El plan óptimo puede repartir
+    el repostaje en dos paradas y salir más barato que cualquier parada única; lo
+    que marca ``es_la_mas_barata`` es la mejor **de las ofrecidas**, que es entre
+    lo que el usuario elige de verdad.
+
+    ``plan`` es el plan completo asociado, no solo esta parada: en un viaje largo,
+    parar aquí puede seguir obligando a un segundo repostaje más adelante, y el
+    usuario tiene que verlo antes de elegir.
+    """
+
+    candidata: EstacionCandidata
+    desvio: Desvio
+    km_desde_origen: float
+    tiempo_desde_origen_s: float
+    litros: float
+    precio_efectivo_milesimas: int
+    plan: Recomendacion
+    sobrecoste_eur: Decimal
+    es_la_mas_barata: bool = False
+
+    @property
+    def estacion(self) -> Estacion:
+        return self.candidata.estacion
+
+    @property
+    def coste_viaje_eur(self) -> Decimal:
+        return self.plan.coste_combustible_eur

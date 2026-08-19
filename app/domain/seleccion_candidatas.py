@@ -28,7 +28,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from app.domain.models import Estacion, EstacionCandidata, Precio, Vehiculo
+from app.domain.models import Desvio, Estacion, EstacionCandidata, Precio, Vehiculo
 from app.domain.ports.price_store import PriceStore
 from app.domain.ports.routing_provider import (
     Coordenada,
@@ -49,12 +49,26 @@ class ParametrosSeleccion:
     ``/table`` a un segundo cada una. 50 candidatas es una petición y unos
     segundos; 250 son 25 peticiones y casi medio minuto. Con OSRM propio (§9)
     este número puede subir sin miedo.
+
+    ``max_desvio_km`` no filtra aquí —el filtro fino es de ``depurar_matriz``,
+    con distancias reales—, pero sí ensancha el corredor: sería absurdo que el
+    rectángulo grueso tirase estaciones que el filtro exacto habría aceptado.
     """
 
     margen_km: float = 5.0
     tramo_km: float = 50.0
     max_candidatas: int = 50
     solo_vigentes: bool = True
+    max_desvio_km: float = 10.0
+
+    @property
+    def margen_efectivo_km(self) -> float:
+        """Ancho real del corredor.
+
+        Un desvío de ``d`` km ida y vuelta pone la estación a ~``d/2`` km de la
+        ruta, así que el rectángulo tiene que llegar al menos hasta ahí.
+        """
+        return max(self.margen_km, self.max_desvio_km / 2.0)
 
 
 @dataclass(frozen=True)
@@ -123,7 +137,7 @@ def seleccionar(
     # y dejar 300 km sin una sola parada posible.
     vistas: dict[int, tuple[int, EstacionCandidata]] = {}
     for orden, tramo in enumerate(tramos):
-        min_lat, min_lon, max_lat, max_lon = bbox_de(tramo, parametros.margen_km)
+        min_lat, min_lon, max_lat, max_lon = bbox_de(tramo, parametros.margen_efectivo_km)
         encontradas = store.estaciones_en_bbox(
             min_lat,
             min_lon,
@@ -154,17 +168,60 @@ class MatrizDepurada:
     candidatas: list[EstacionCandidata]
     distancias_km: list[list[float]]
     duraciones_s: list[list[float]]
+    desvios: list[Desvio]
     descartadas: list[EstacionCandidata]
+    descartadas_por_desvio: list[EstacionCandidata]
 
 
-def depurar_matriz(candidatas: Sequence[EstacionCandidata], matriz: MatrizRuta) -> MatrizDepurada:
-    """Quita las candidatas que OSRM no resolvió y reordena por distancia real.
+def desvio_de(matriz: MatrizRuta, indice: int, destino: int) -> Desvio | None:
+    """Lo que cuesta pasar por ``indice`` en vez de seguir de largo.
 
-    Las dos cosas hay que hacerlas antes de llamar al DP (§8.4): una candidata
-    sin respuesta tiene sus celdas a ``inf`` y no puede entrar en la matriz, y
-    el DP da por hecho que el orden de las candidatas es el de avance por la
-    ruta. Aquí ese orden deja de ser una estimación y pasa a ser el kilometraje
-    real desde el origen.
+    ``None`` si OSRM no sabe ir hasta ahí o volver: eso no es un desvío grande,
+    es que no hay camino (§8.4).
+    """
+    tramos = (
+        matriz.distancias_km[0][indice],
+        matriz.distancias_km[indice][destino],
+        matriz.distancias_km[0][destino],
+        matriz.duraciones_s[0][indice],
+        matriz.duraciones_s[indice][destino],
+        matriz.duraciones_s[0][destino],
+    )
+    if not all(math.isfinite(valor) for valor in tramos):
+        return None
+    ida_km, vuelta_km, directo_km, ida_s, vuelta_s, directo_s = tramos
+    # El máximo con cero es por prudencia numérica: la desigualdad triangular no
+    # se rompe en una red de carreteras, pero un empate puede salir en -0.0001 y
+    # un desvío negativo no significaría nada.
+    return Desvio(
+        km=max(0.0, ida_km + vuelta_km - directo_km),
+        segundos=max(0.0, ida_s + vuelta_s - directo_s),
+    )
+
+
+def depurar_matriz(
+    candidatas: Sequence[EstacionCandidata],
+    matriz: MatrizRuta,
+    max_desvio_km: float = 10.0,
+    max_desvio_min: float = 15.0,
+) -> MatrizDepurada:
+    """Deja solo las candidatas utilizables, con su desvío, en orden de avance.
+
+    Tres cosas, todas antes de llamar al DP:
+
+    1. **Fuera las que OSRM no resolvió** (§8.4): tienen sus celdas a ``inf`` y
+       no pueden entrar en la matriz.
+    2. **Fuera las que no son viables**: el desvío real por carretera no cabe en
+       el límite. Es aquí donde vive la restricción que sustituye al precio del
+       tiempo (§8.2); el DP ya solo ve estaciones a las que merece la pena ir, y
+       dentro de ellas puede mandar el dinero sin producir disparates.
+    3. **Reordena por kilometraje real** desde el origen. El DP da por hecho que
+       el orden de las candidatas es el de avance por la ruta; aquí ese orden
+       deja de ser la estimación por tramos y pasa a ser la distancia medida.
+
+    ``max_desvio_min`` es una red de seguridad, no el mando principal: cubre la
+    gasolinera que está a un kilómetro de la vía pero a diez minutos por dentro
+    del pueblo, que los kilómetros por sí solos no distinguen.
 
     Raises:
         ExtremosSinRuta: si el que no se resuelve es el origen o el destino.
@@ -179,7 +236,24 @@ def depurar_matriz(candidatas: Sequence[EstacionCandidata], matriz: MatrizRuta) 
             "caen en una carretera y no en mitad del campo o del mar."
         )
 
-    validas = [i for i in range(1, n + 1) if i not in sin_respuesta]
+    max_desvio_s = max_desvio_min * 60.0
+    validas: list[int] = []
+    desvios: dict[int, Desvio] = {}
+    fuera_de_limite: list[int] = []
+
+    for i in range(1, n + 1):
+        if i in sin_respuesta:
+            continue
+        desvio = desvio_de(matriz, i, destino)
+        if desvio is None:
+            sin_respuesta.add(i)
+            continue
+        if desvio.km > max_desvio_km or desvio.segundos > max_desvio_s:
+            fuera_de_limite.append(i)
+            continue
+        validas.append(i)
+        desvios[i] = desvio
+
     validas.sort(key=lambda i: matriz.distancias_km[0][i])
     orden = [0, *validas, destino]
 
@@ -187,7 +261,9 @@ def depurar_matriz(candidatas: Sequence[EstacionCandidata], matriz: MatrizRuta) 
         candidatas=[candidatas[i - 1] for i in validas],
         distancias_km=[[matriz.distancias_km[a][b] for b in orden] for a in orden],
         duraciones_s=[[matriz.duraciones_s[a][b] for b in orden] for a in orden],
+        desvios=[desvios[i] for i in validas],
         descartadas=[candidatas[i - 1] for i in sorted(sin_respuesta) if 1 <= i <= n],
+        descartadas_por_desvio=[candidatas[i - 1] for i in fuera_de_limite],
     )
 
 

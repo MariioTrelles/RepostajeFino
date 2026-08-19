@@ -390,7 +390,8 @@ button.secundario:hover {
 }
 
 .paradas,
-.cercanas {
+.cercanas,
+.opciones {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -441,6 +442,79 @@ button.secundario:hover {
 .parada-cifras {
   margin: 4px 0 0;
   font-variant-numeric: tabular-nums;
+}
+
+/* Opciones: dónde puede elegir parar el conductor (§8.6). */
+
+.opcion {
+  padding: 10px 8px;
+  margin: 0 -8px;
+  border-top: 1px solid var(--linea);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.opcion:hover,
+.opcion:focus-visible {
+  background: var(--fondo-suave, rgba(0, 0, 0, 0.035));
+}
+
+.opcion-optima {
+  box-shadow: inset 3px 0 0 var(--tinta);
+}
+
+.opcion-cabecera {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+}
+
+.opcion-hora {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--tinta-2);
+}
+
+.opcion-rotulo {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* El sobrecoste es la cifra que hace elegir: va alineada a la derecha y en
+   tabulares para que las de varias filas se puedan comparar de un vistazo. */
+.opcion-sobrecoste {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--tinta-2);
+}
+
+.opcion-mejor {
+  font-weight: 600;
+  color: var(--tinta);
+}
+
+/* Marcador de opción en el mapa: un anillo, sin número. No es un orden que
+   seguir, es una alternativa entre la que elegir. */
+.marcador-opcion span {
+  display: block;
+  width: 14px;
+  height: 14px;
+  margin: 4px;
+  background: transparent;
+  border: 3px solid var(--tinta);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px #fcfcfb;
+}
+
+.marcador-opcion-mejor span {
+  background: var(--tinta);
 }
 
 .caducado {

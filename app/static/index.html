@@ -119,8 +119,8 @@
             <summary>Ajustes de optimización</summary>
             <div class="rejilla">
               <label>
-                Valor del tiempo <span class="unidad">€/h</span>
-                <input id="valor-tiempo" type="number" step="1" min="0" value="15" />
+                Desvío máximo <span class="unidad">km</span>
+                <input id="max-desvio" type="number" step="1" min="1" max="50" value="10" />
               </label>
               <label>
                 Parada <span class="unidad">s</span>
@@ -135,6 +135,11 @@
                 <input id="margen-corredor" type="number" step="1" min="1" max="50" value="5" />
               </label>
             </div>
+            <p class="apunte">
+              El desvío máximo son los kilómetros de más que admites por pasar por una
+              gasolinera, ida y vuelta: una a 5 km de la carretera son unos 10 km. Es lo
+              que decide si una gasolinera es una opción o no.
+            </p>
             <p class="apunte">
               Las candidatas son el mando del tiempo de respuesta: 50 son unos segundos
               y 250, con el OSRM público, casi medio minuto.
