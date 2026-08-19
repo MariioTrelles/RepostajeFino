@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Repostaje Fino</title>
+    <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
+    <link rel="stylesheet" href="/estilos.css" />
+  </head>
+  <body>
+    <main id="mapa" aria-label="Mapa de la ruta y las gasolineras"></main>
+
+    <aside id="panel">
+      <header class="cabecera">
+        <h1>Repostaje Fino</h1>
+        <p class="lema">Dónde repostar y cuánto, contando el coste real del desvío.</p>
+      </header>
+
+      <!-- 1. Formulario -->
+      <section id="vista-formulario" class="vista">
+        <form id="formulario" novalidate>
+          <fieldset>
+            <legend>Trayecto</legend>
+            <p class="apunte">
+              Escribe una dirección o haz clic en el mapa. El clic fija el
+              <strong id="punto-armado">origen</strong>.
+            </p>
+
+            <div class="campo-busqueda" data-punto="origen">
+              <label for="busqueda-origen">Origen</label>
+              <div class="fila-entrada">
+                <input
+                  id="busqueda-origen"
+                  type="text"
+                  role="combobox"
+                  autocomplete="off"
+                  aria-expanded="false"
+                  aria-controls="sugerencias-origen"
+                  placeholder="Puerta del Sol, Madrid"
+                />
+                <button
+                  type="button"
+                  class="fijar-en-mapa"
+                  data-fijar="origen"
+                  aria-pressed="true"
+                  title="Fijar el origen con el próximo clic en el mapa"
+                >
+                  Clic
+                </button>
+              </div>
+              <ul id="sugerencias-origen" class="sugerencias" role="listbox" hidden></ul>
+              <p class="estado-busqueda" role="status"></p>
+              <p class="coordenada" data-coordenada="origen"></p>
+            </div>
+
+            <div class="campo-busqueda" data-punto="destino">
+              <label for="busqueda-destino">Destino</label>
+              <div class="fila-entrada">
+                <input
+                  id="busqueda-destino"
+                  type="text"
+                  role="combobox"
+                  autocomplete="off"
+                  aria-expanded="false"
+                  aria-controls="sugerencias-destino"
+                  placeholder="Plaza de Cataluña, Barcelona"
+                />
+                <button
+                  type="button"
+                  class="fijar-en-mapa"
+                  data-fijar="destino"
+                  aria-pressed="false"
+                  title="Fijar el destino con el próximo clic en el mapa"
+                >
+                  Clic
+                </button>
+              </div>
+              <ul id="sugerencias-destino" class="sugerencias" role="listbox" hidden></ul>
+              <p class="estado-busqueda" role="status"></p>
+              <p class="coordenada" data-coordenada="destino"></p>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>Vehículo</legend>
+            <label class="ancho" for="combustible">Combustible</label>
+            <select id="combustible"></select>
+
+            <div class="rejilla">
+              <label>
+                Consumo <span class="unidad">L/100 km</span>
+                <input id="consumo" type="number" step="0.1" min="0.1" value="6.5" />
+              </label>
+              <label>
+                Depósito <span class="unidad">L</span>
+                <input id="capacidad" type="number" step="1" min="1" value="55" />
+              </label>
+              <label>
+                Nivel actual <span class="unidad">L</span>
+                <input id="nivel" type="number" step="1" min="0" value="20" />
+              </label>
+              <label>
+                Reserva <span class="unidad">L</span>
+                <input id="reserva" type="number" step="1" min="0" value="5" />
+              </label>
+            </div>
+          </fieldset>
+
+          <details>
+            <summary>Marcas</summary>
+            <p class="apunte">
+              Sin marcar nada salen todas, independientes incluidas. Al marcar alguna,
+              el resto desaparece.
+            </p>
+            <div id="marcas" class="marcas"></div>
+          </details>
+
+          <details>
+            <summary>Ajustes de optimización</summary>
+            <div class="rejilla">
+              <label>
+                Valor del tiempo <span class="unidad">€/h</span>
+                <input id="valor-tiempo" type="number" step="1" min="0" value="15" />
+              </label>
+              <label>
+                Parada <span class="unidad">s</span>
+                <input id="tiempo-parada" type="number" step="30" min="0" value="300" />
+              </label>
+              <label>
+                Candidatas <span class="unidad">máx.</span>
+                <input id="max-candidatas" type="number" step="10" min="2" max="250" value="50" />
+              </label>
+              <label>
+                Corredor <span class="unidad">km</span>
+                <input id="margen-corredor" type="number" step="1" min="1" max="50" value="5" />
+              </label>
+            </div>
+            <p class="apunte">
+              Las candidatas son el mando del tiempo de respuesta: 50 son unos segundos
+              y 250, con el OSRM público, casi medio minuto.
+            </p>
+          </details>
+
+          <p id="error-formulario" class="aviso aviso-error" hidden></p>
+          <button type="submit" class="principal">Calcular ruta óptima</button>
+        </form>
+      </section>
+
+      <!-- 2. Espera -->
+      <section id="vista-espera" class="vista" hidden>
+        <h2 class="titulo-aviso">Calculando…</h2>
+        <div class="barra" role="progressbar" aria-label="Calculando la ruta óptima"><span></span></div>
+        <p class="apunte" id="detalle-espera"></p>
+      </section>
+
+      <!-- 3. Resultado y 4. fallos: los pinta panel.js -->
+      <section id="vista-resultado" class="vista" hidden></section>
+      <section id="vista-error" class="vista" hidden></section>
+
+      <footer class="pie">
+        Precios del Geoportal de Carburantes (MITECO) · rutas de OSRM · direcciones de
+        Photon · mapa de OpenStreetMap
+      </footer>
+    </aside>
+
+    <script src="/vendor/leaflet/leaflet.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

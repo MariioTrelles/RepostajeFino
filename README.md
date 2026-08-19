@@ -18,7 +18,11 @@ Siguiendo el orden de [`ARQUITECTURA.md` §12](ARQUITECTURA.md):
 - [x] Paso 2 — dominio aislado (`models.py`, `dp_optimizer.py`, `precio_efectivo.py`)
 - [x] Paso 3 — `osrm_adapter.py` (polilínea + `/table` por bloques, con reintentos)
 - [x] Paso 4 — API FastAPI (`POST /api/ruta-optima`)
-- [ ] Paso 5 — frontend Leaflet
+- [x] Paso 5 — frontend Leaflet, v1 mínima ([§13](ARQUITECTURA.md))
+- [ ] Paso 6 — filtro multi-combustible: `GET /api/estaciones` ([§6.3](ARQUITECTURA.md))
+
+Con la app levantada, la interfaz está en <http://127.0.0.1:8000/>: la sirve el
+propio FastAPI, en el mismo origen que la API ([§9.1](ARQUITECTURA.md)).
 
 ## Puesta en marcha
 

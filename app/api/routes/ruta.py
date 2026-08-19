@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, model_validator
 from app.adapters.ingestion.productos import (
     CODIGOS_PRODUCTO,
     PRODUCTOS_NO_PROPULSION,
+    PRODUCTOS_POR_DEFECTO_UI,
 )
 from app.adapters.ingestion.rotulo_normalizer import MARCAS_FILTRABLES
 from app.adapters.routing.osrm_adapter import ErrorOSRM, RoutingNoDisponible
@@ -411,6 +412,34 @@ async def ruta_optima(
 async def marcas() -> list[str]:
     """`INDEPENDIENTE` no está en la lista a propósito (§6 y §11)."""
     return list(MARCAS_FILTRABLES)
+
+
+class CombustibleOut(BaseModel):
+    codigo: str
+    etiqueta: str
+    por_defecto: bool
+
+
+@router.get("/combustibles", summary="Combustibles que el DP puede optimizar")
+async def combustibles() -> list[CombustibleOut]:
+    """El catálogo para el desplegable de la UI.
+
+    Mismo criterio que `/marcas` (§6): la lista la sirve el servidor para que el
+    frontend no mantenga su propia copia de los códigos y se desincronice con la
+    ingesta. `adblue` y `amoniaco` no salen: no son carburante de automoción.
+    """
+    catalogo = [
+        CombustibleOut(
+            codigo=codigo,
+            etiqueta=campo.removeprefix("Precio "),
+            por_defecto=codigo in PRODUCTOS_POR_DEFECTO_UI,
+        )
+        for campo, codigo in CODIGOS_PRODUCTO.items()
+        if codigo in PRODUCTOS_VALIDOS
+    ]
+    # Estable: los de por defecto arriba, el resto en el orden del mapeo.
+    catalogo.sort(key=lambda c: not c.por_defecto)
+    return catalogo
 
 
 # ---------------------------------------------------------------------------

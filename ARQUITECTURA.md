@@ -25,7 +25,8 @@ del desvío.
 | Precios           | API REST Geoportal Carburantes (MITECO)       | sin auth, formato XML/JSON                                    |
 | Recarga eléctrica | NAP DGT, formato DATEX2                       | fuente **distinta**, ingesta aparte                            |
 | Rutas             | OSRM                                          | público para prototipo, autoalojado en Docker para producción |
-| Frontend          | Web sencilla + Leaflet                        | tiles OSM (vigilar política de uso si crece)                  |
+| Frontend          | Web sencilla + Leaflet, sin build             | tiles OSM (vigilar política de uso si crece) — ver §13        |
+| Geocoding         | Photon (komoot), desde el navegador           | sin clave; el servidor no geocodifica (§6.2 y §13.2)          |
 | Algoritmo         | Gas station problem con programación dinámica | variante con coste de desvío                                  |
 
 ### Python >= 3.12 es un requisito duro, no una preferencia
@@ -85,11 +86,12 @@ app/
 │       ├── productos.py           # campo de la API -> código interno (§6)
 │       └── ev_charger_client.py   # NAP DGT, DATEX2 (fase 2)
 │
-├── main.py                    # app FastAPI: monta el router y poco más
+├── main.py                    # app FastAPI: monta routers y estáticos (§9.1)
 │
 ├── api/
 │   ├── routes/
-│   │   └── ruta.py            # POST /api/ruta-optima — ver §6.2
+│   │   ├── ruta.py            # POST /api/ruta-optima — ver §6.2
+│   │   └── estaciones.py      # GET /api/estaciones (mapa) — ver §6.3, paso 5
 │   └── dependencies.py        # inyección: qué adaptador implementa cada puerto
 │
 └── jobs/
@@ -500,7 +502,11 @@ un resultado vacío silencioso.
 **Origen y destino son coordenadas, no texto** (decidido). Geocodificar en el
 servidor obligaría a un puerto y un adaptador que §3 no contempla, y a cargar con
 la política de uso de otro servicio público más. El paso 5 tiene el mapa delante:
-resolver "Madrid" es cosa del cliente, por clic o por Nominatim desde el navegador.
+resolver "Madrid" es cosa del cliente.
+
+Esto **no** significa que el usuario tenga que clicar en un mapa para decir
+"Madrid": el buscador de direcciones existe, vive en el navegador y está
+especificado en §13.2. Lo que decide esta sección es dónde *no* vive.
 
 **La respuesta trae el plan, la polilínea y las candidatas consideradas**
 (decidido) con su precio y su marca de vigencia (§4.2). El frontend pinta mapa y
@@ -522,12 +528,40 @@ Si OSRM resuelve unas candidatas y otras no, la petición **sale con 200 y un
 aviso** diciendo cuántas se quedaron fuera: es la degradación explícita de §8.4,
 ni un 500 ni un plan silenciosamente peor.
 
-**Pendiente para el paso 5**: hoy el endpoint solo conoce el combustible del
-coche, así que el mapa solo puede pintar ese. El filtro multi-combustible de
-visualización necesitará o bien conformarse con eso, o bien un endpoint de mapa
-aparte que acepte varios productos. Es la distinción entre
-`Vehiculo.tipo_combustible` y el filtro de la UI —la tabla del principio de §6—
-llevada hasta el final, y es lo único de ella que sigue sin resolver.
+Este endpoint conoce **un solo** combustible, el del coche, así que el mapa no
+puede pintar otros desde aquí. Eso no es una carencia: es la tabla del principio
+de §6 llevada hasta el final. La visualización multi-producto va por su propio
+endpoint, §6.3.
+
+### 6.3. Endpoint de mapa (decidido: `GET /api/estaciones` aparte, multi-producto)
+
+El filtro de la UI muestra varios combustibles a la vez; el DP optimiza sobre
+uno. Meter una lista de productos en `POST /api/ruta-optima` mezclaría las dos
+cosas que §6 se esfuerza en mantener separadas, y obligaría al endpoint de
+optimización a cargar con precios que el DP no va a mirar.
+
+**Va aparte**: `GET /api/estaciones?min_lat=&min_lon=&max_lat=&max_lon=&productos=&rotulos=`.
+Es exponer lo que ya existe —la consulta de bbox del `PriceStore` con su filtro
+de marca (§6)— no lógica nueva: sin R\*Tree adicional, sin OSRM y sin tocar el
+dominio.
+
+- **`solo_vigentes` apagado**, que es el modo para el que §4.2 lo dejó así por
+  defecto: el mapa muestra el precio caducado marcado ("sin actualizar desde
+  hace X días") en vez de hacer desaparecer la estación.
+- **Las marcas son las mismas** que sirve `GET /api/marcas`, con la regla de
+  `INDEPENDIENTE` de §6 intacta: pedir una marca fuera del diccionario es 422.
+- **Varios productos, una llamada por producto** contra el puerto, que hoy
+  acepta `producto` en singular. Con los uno o dos productos que marca un
+  usuario y SQLite en el mismo proceso, el coste es despreciable. Si algún día
+  molesta, se ensancha la firma a `productos: Sequence[str]`; no hay nada en
+  este diseño que lo impida.
+- **El bbox lo manda el cliente**, que es quien sabe qué trozo de mapa se está
+  mirando. Conviene un tope de área o de resultados: "toda España con cuatro
+  productos" son decenas de miles de filas que nadie va a leer.
+
+No sustituye a las candidatas que devuelve `/api/ruta-optima`: aquellas son las
+que compitieron por entrar en el plan (§8.5), estas son simplemente lo que hay
+dentro del recuadro que el usuario tiene delante.
 
 ---
 
@@ -850,6 +884,26 @@ Consecuencias de trabajar en local por ahora:
   que el snapshot público no contiene (`Tipo Venta = R`, coordenadas ausentes,
   precio cero, producto sin mapear, campo de longitud alternativo).
 
+### 9.1. Cómo se sirve el frontend (decidido: mismo origen, desde FastAPI)
+
+El paso 5 son ficheros estáticos (HTML, JS, Leaflet) y hay que decidir quién los
+entrega antes de escribirlos, porque cambia el arranque.
+
+**Los sirve la propia app**, con `StaticFiles` montado en la raíz y la API
+colgando de `/api`. Mismo origen, así que **no hay CORS que configurar**: en un
+despliegue local (§9) y sin login ni cookies (§3), montar CORS sería
+configuración a cambio de nada, y una lista de orígenes permitidos mal puesta es
+de los fallos que solo aparecen al desplegar.
+
+- El router de la API va montado **antes** que los estáticos, para que
+  `/api/...` nunca lo resuelva el servidor de ficheros.
+- Si algún día el frontend se sirve aparte (CDN, otro host), añadir
+  `CORSMiddleware` es una línea y no cambia nada del diseño: esta decisión no
+  cierra esa puerta, solo evita pagar hoy por ella.
+- No convierte a FastAPI en un servidor web serio: cuando haya despliegue real
+  con proxy inverso delante, los estáticos los puede servir él y la app se queda
+  igual.
+
 ### A ~100 usuarios concurrentes
 
 - **OSRM público queda descartado**: su política limita a ~1 req/s y no da garantías
@@ -937,17 +991,25 @@ Cuando se necesiten **múltiples instancias de la API en máquinas distintas**
       de índices sin respuesta; nunca con un cero (ver §8.4)
 - [x] **`precio_efectivo` con un perfil de descuento**: lanza
       `NotImplementedError` en vez de aplicar la identidad (ver §6.1)
+- [x] **Filtro multi-combustible para el mapa**: endpoint propio
+      `GET /api/estaciones`, con varios productos y sin tocar el de ruta óptima,
+      que sigue conociendo solo el combustible del coche (ver §6.3)
+- [x] **Cómo se sirve el frontend**: desde el propio FastAPI, mismo origen y sin
+      CORS; la API en `/api` y los estáticos en la raíz (ver §9.1)
+- [x] **Alcance de la v1 del frontend**: solo lo que devuelve `/api/ruta-optima`;
+      el filtro multi-combustible es un paso 6 aparte (ver §13.1)
+- [x] **Herramientas del frontend**: sin build, módulos ES y Leaflet vendorizado
+      en el repo, no por CDN (ver §13.1)
+- [x] **Buscador de direcciones**: Photon desde el navegador, con autocompletado;
+      Nominatim descartado por su política y CartoCiudad por no servir para texto
+      a medias. El servidor sigue sin geocodificar (ver §13.2)
 
 ### Pendientes
 
-- [ ] **Filtro multi-combustible para el mapa**. El endpoint de ruta solo conoce
-      el combustible del coche (§6.2), así que hoy el mapa solo puede pintar ese.
-      O el paso 5 se conforma, o hace falta un endpoint de mapa que acepte varios
-      productos. Es la distinción `Vehiculo.tipo_combustible` vs. filtro de la UI
-      (§6) llevada hasta el final.
-- [ ] **Cómo se sirve el frontend**: desde el propio FastAPI (mismo origen, sin
-      CORS que configurar) o aparte con CORS. Hay que decidirlo antes de escribir
-      la primera línea del paso 5, porque cambia el arranque.
+Ninguna abierta. Lo que queda fuera del alcance de hoy no es una decisión sin
+tomar sino trabajo aplazado a propósito, y ya tiene su sitio: recarga eléctrica
+(§5), catálogo de vehículos y `PerfilDescuento` real (§7 y §6.1), escalado con
+sus disparadores (§9) e ideas de futuro (§10).
 
 ---
 
@@ -963,10 +1025,160 @@ Cuando se necesiten **múltiples instancias de la API en máquinas distintas**
    bloques por el límite de 100 coordenadas, con reintentos y sin fallback (§8.4).
 4. ✅ **API FastAPI**: un solo endpoint de ruta óptima que une las tres piezas
    (§6.2), más la selección de candidatas que las pega (§8.5).
-5. **Frontend Leaflet**: mapa, formulario de vehículo, filtros. Antes de empezar,
-   las dos decisiones pendientes de §11.
+5. **Frontend Leaflet** (§13): v1 mínima —mapa, formulario, plan y pantallas de
+   error— servida por la propia app en la raíz, sin CORS (§9.1), con buscador de
+   direcciones Photon en el cliente (§13.2).
+6. **Filtro multi-combustible**: `GET /api/estaciones` (§6.3) y los controles de
+   producto y marca sobre el mapa. Va después del 5 a propósito: el paso 5 ya
+   tiene bastantes piezas nuevas a la vez.
 
 El paso 2 antes del 3 es deliberado: si el DP depende de OSRM para poder probarse,
 pierdes la ventaja principal de haber elegido hexagonal. Visto en retrospectiva,
 salió bien: cuando llegó OSRM, lo único que hubo que enseñarle al DP fue que una
 distancia puede ser `inf`.
+
+---
+
+## 13. Frontend (paso 5)
+
+### 13.1. Alcance y forma (decidido: v1 mínima, una pantalla, sin build)
+
+**La v1 pinta solo lo que ya devuelve `POST /api/ruta-optima`**: mapa, formulario
+de vehículo, plan y pantallas de error. El filtro multi-combustible sobre
+`GET /api/estaciones` (§6.3) es una segunda tanda, no un requisito para ver el
+proyecto funcionando. Hasta hoy el backend solo se puede usar con `curl`, y hay
+una clase de error —un plan que a ojo no tiene sentido— que ningún test cuenta y
+un mapa sí.
+
+**Sin build: HTML, módulos ES y Leaflet vendorizado en el repo.** Es lo que §2 ya
+anticipaba con "web sencilla". Un formulario, un mapa y una lista no justifican
+Vite ni `node_modules`, y el proyecto no tiene hoy ninguna dependencia de JS que
+mantener. Si algún día crece, migrar son cuatrocientas líneas.
+
+Lo de vendorizar Leaflet **no es para funcionar sin internet** —los tiles, OSRM y
+el buscador necesitan red igual—: es para no depender de la disponibilidad ni de
+la política de un CDN, por el mismo motivo por el que los tests van contra un
+snapshot local (§9).
+
+```
+app/static/
+├── index.html
+├── app.js          # estado de la pantalla y orquestación
+├── api.js          # fetch + traducción de los errores tipados de §6.2
+├── geocoder.js     # buscar(texto, cerca) -> [{etiqueta, lat, lon}] — §13.2
+├── mapa.js         # Leaflet: polilínea, capas, marcadores, popups
+├── panel.js        # formulario, buscador y plan
+├── formato.js      # euros, litros, km y duraciones; lo comparten panel y mapa
+├── estilos.css
+└── vendor/leaflet/ # 1.9.4, con sus imágenes
+```
+
+El catálogo del desplegable de combustibles lo sirve `GET /api/combustibles`,
+por el mismo motivo que `/marcas` (§6): que la UI no mantenga su propia copia de
+los códigos y se desincronice con la ingesta.
+
+**Una sola pantalla, sin router.** Mapa a toda la ventana y panel lateral
+(~380 px) que en pantalla estrecha pasa a hoja inferior. El panel tiene tres
+estados —formulario, esperando, resultado— y el error ocupa el sitio del
+resultado, nunca un `alert`.
+
+El `Vehiculo` se guarda en `localStorage`, que es exactamente lo que §3 previó al
+decidir stateless: el servidor no recuerda nada y el navegador no obliga a
+repetir el formulario.
+
+### 13.2. Buscador de direcciones (decidido: Photon, desde el navegador)
+
+Escribir "Gran Vía 1, Madrid" es **obligatorio**, no un extra: obligar a clicar en
+el mapa para fijar origen y destino es peor producto. §6.2 no lo impedía —lo que
+decidió es que el servidor no geocodifica—, así que el buscador vive entero en el
+cliente y no añade puerto, adaptador ni dependencia al backend.
+
+**Los tres candidatos, comprobados contra el servicio vivo (agosto de 2026)**:
+
+| Geocoder             | CORS | Clave | Texto a medias (`plaza catalu`)   | Dirección exacta         |
+| -------------------- | ---- | ----- | --------------------------------- | ------------------------ |
+| **Photon** (komoot)  | `*`  | no    | ✅ Plaza de Cataluña, Madrid/Leganés | encuentra Calle Mayor 1  |
+| CartoCiudad (IGN)    | `*`  | no    | ❌ `gran via 5 val` → Pozuelo, Mont-roig | ✅ portal, CP y municipio oficiales |
+| Nominatim            | `*`  | no    | su política **descarta el autocompletado** | correcto        |
+
+- **Los tres sirven `Access-Control-Allow-Origin: *`**, así que ninguno necesita
+  proxy. Era la duda que podía haber roto §6.2 y no la rompe.
+- **Nominatim queda fuera por política, no por técnica**: la instancia pública no
+  admite búsquedas por pulsación. Serviría para "buscar al pulsar Enter", que es
+  justo la experiencia que se quiere evitar.
+- **CartoCiudad no es un buscador, es un normalizador de direcciones.** Con la
+  dirección completa es el mejor de los tres y encima oficial (tiene endpoint
+  `candidates` en JSON limpio, sin envoltorio JSONP); con texto a medias devuelve
+  cualquier cosa. Es el sitio al que ir si algún día hace falta clavar el número
+  de portal, no el que alimenta el desplegable.
+
+**Detalles que costaron una comprobación y conviene no redescubrir**:
+
+- **Photon no acepta `lang=es`**: solo `default`, `de`, `en`, `fr`. Mandarlo
+  devuelve un 400, no un aviso.
+- **Photon no tiene filtro por país.** El sesgo se da con `lat`/`lon` al centro
+  del mapa, y España se filtra en el cliente por
+  `properties.countrycode === "ES"`.
+- **`properties.name` viene a `null`** en portales, así que la etiqueta que ve el
+  usuario hay que componerla con `street`, `housenumber` y `city`.
+
+**Higiene de peticiones** (la instancia pública es gratuita y pide buen uso):
+retardo de ~300 ms desde la última tecla, mínimo 3 caracteres, `AbortController`
+para cancelar la búsqueda anterior y caché en memoria de lo ya consultado. Nada
+de una petición por pulsación.
+
+El clic en el mapa **sigue existiendo** y los marcadores son arrastrables, pero
+como complemento del buscador, no como única vía.
+
+Todo esto entra por `geocoder.js`, que expone una sola función. Cambiar de
+proveedor, o añadir CartoCiudad para afinar el portal al elegir un resultado, es
+tocar ese fichero y nada más — el mismo criterio de puertos de §3, aplicado en el
+cliente.
+
+**Cuándo dejaría de valer llamarlo desde el navegador**: con varios usuarios, cada
+pestaña tiene su propio retardo y su propia caché, y el ritmo agregado contra
+Photon no lo limita nadie. Es el mismo razonamiento que el `lru_cache` de §3 con
+el limitador de OSRM. Si se llega ahí, el arreglo es un `GET /api/buscar` que haga
+de proxy con caché compartida, y entonces sí habría que revisar §6.2. Hoy, con un
+usuario, sería complicarse por adelantado.
+
+### 13.3. Mapa, espera y fallos
+
+**El mapa pinta tres capas**: la polilínea de la ruta directa; las candidatas
+como círculos pequeños coloreados por precio efectivo, en gris las no vigentes
+(§4.2 pide marcar lo caducado, no ocultarlo); y las paradas como marcador
+numerado, con popup de litros, €/L efectivo, coste y nivel de llegada y salida.
+
+**La escala de precio es secuencial de un solo tono** (azul claro → oscuro por
+cuantiles), no el verde-rojo que pide el instinto: el precio es una magnitud, no
+una polaridad, y verde-rojo es justo el par que peor distingue un daltónico. El
+paso más claro está elegido para seguir viéndose sobre el color de los tiles de
+OSM, que es más oscuro que un fondo blanco. **El precio caducado no se distingue
+solo por el color**: va además sin relleno y con el borde discontinuo.
+
+**El plan** lista las paradas con su kilómetro y desglosa el coste en combustible
+y tiempo, con el tiempo como **exceso sobre la ruta directa** — §8.2 es explícita
+en que el total del viaje no significa nada para el usuario.
+
+**La espera es parte del diseño, no un spinner mudo.** Una petición va de 1,5 s a
+casi medio minuto según `max_candidatas` (§8.5), así que hay barra de progreso y
+un texto que dice que se está consultando OSRM. El mando de `max_candidatas` va
+en los ajustes plegados junto a los de §8.2, con su advertencia de tiempo al
+lado.
+
+**Cada fila de la tabla de §6.2 tiene su pantalla**, que es lo que evita que la
+honestidad del backend se pierda en el último metro:
+
+- `bajo_reserva` no se pinta como error, sino como respuesta útil: las
+  gasolineras más cercanas al origen, en el mapa y en la lista.
+- `trayecto_inviable` nombra el hueco entre `desde` y `hasta` con sus cifras:
+  cuántos km hay, cuántos da el depósito, cuántos faltan y cuántas candidatas
+  quedaron a tiro. **En el panel, no en el mapa**: `desde` y `hasta` son
+  etiquetas ("Origen", el rótulo de una estación), no coordenadas, así que hoy
+  no hay con qué dibujar el tramo. Resaltarlo exigiría que la API devolviera
+  también las coordenadas de los dos extremos del hueco; es barato, pero es un
+  cambio en el backend y no entra en la v1.
+- "Ninguna candidata con precio vigente" ofrece un botón que reintenta con el
+  corredor ensanchado, en vez de dejar al usuario adivinando.
+- `avisos` (la degradación explícita de §8.4) va en una banda sobre el plan: el
+  plan es válido, pero se dice qué se quedó fuera.
