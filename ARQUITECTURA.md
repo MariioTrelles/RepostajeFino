@@ -798,6 +798,25 @@ Consecuencias de trabajar en local por ahora:
   el principio y **guarda un snapshot local de la respuesta** para poder desarrollar
   y testear sin depender de que el servicio esté vivo.
 
+- **Y corta el handshake TLS con OpenSSL 3 por defecto** (comprobado el
+  18/08/2026, y es la trampa más cara de las suyas). El síntoma es un
+  `httpx.ConnectError` con "conexión forzada por el host remoto": clavado a una
+  caída de red, así que lo primero que uno hace es sospechar del User-Agent, que
+  es lo que avisa todo el mundo. No es eso. Con **el mismo URL y el mismo
+  User-Agent**, `curl` baja los 12 MB y `httpx` no; forzar TLS 1.2 tampoco
+  arregla nada. Lo que sobra es el `SECLEVEL=2` por defecto de OpenSSL 3, que ya
+  no admite los cifrados que ofrece ese IIS:
+
+  ```python
+  contexto = ssl.create_default_context()
+  contexto.set_ciphers("DEFAULT@SECLEVEL=1")   # el certificado se sigue verificando
+  httpx.AsyncClient(verify=contexto)
+  ```
+
+  Está en `contexto_tls_geoportal()`, y solo afecta a esa llamada. Nada de
+  `verify=False`: bajar el nivel de cifrado para hablar con un servidor viejo es
+  una cosa, dejar de comprobar con quién hablas es otra muy distinta.
+
 - **El endpoint bueno es este**:
 
   ```

@@ -7,6 +7,8 @@ Trampas de esta API, todas ellas fuente conocida de bugs (ARQUITECTURA.md §4 y 
 - Precios como cadena vacía cuando la estación no vende ese producto.
 - ``Tipo Venta``: hay que quedarse solo con la pública (``P``).
 - El servicio corta la conexión según User-Agent: se manda uno de navegador.
+- Y corta también el handshake TLS con los valores por defecto de OpenSSL 3:
+  ver ``contexto_tls_geoportal()``, que es lo que de verdad lo desbloquea.
 
 La descarga y el parseo están separados a propósito: ``parsear()`` es una función
 pura sobre el JSON ya cargado, así que los tests corren contra un snapshot local
@@ -17,9 +19,11 @@ from __future__ import annotations
 
 import json
 import logging
+import ssl
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +73,31 @@ class ResultadoIngesta:
 
 class ErrorGeoportal(RuntimeError):
     """La respuesta del Geoportal no tiene la forma esperada."""
+
+
+@lru_cache(maxsize=1)
+def contexto_tls_geoportal() -> ssl.SSLContext:
+    """Contexto TLS tolerante con el IIS del Ministerio (ARQUITECTURA.md §9).
+
+    El servidor **corta la conexión durante el handshake** con la configuración
+    por defecto de OpenSSL 3 (`SECLEVEL=2`), y el síntoma no ayuda nada: un
+    `ConnectError` con "conexión forzada por el host remoto", idéntico a una
+    caída de red. Es fácil perder una tarde creyendo que es cosa del
+    User-Agent, porque es lo que avisa la documentación y lo que todo el mundo
+    prueba primero.
+
+    Comprobado el 18/08/2026: mismo URL y mismo User-Agent, `curl` baja los
+    12 MB y `httpx` no. La diferencia no es la cabecera ni la versión de TLS
+    —forzar 1.2 tampoco basta—, sino que el nivel de seguridad por defecto ya
+    no admite los cifrados que ofrece ese servidor.
+
+    Solo baja el listón para **esta** llamada: el resto del proceso sigue con
+    los valores por defecto. No se desactiva la verificación del certificado,
+    que se sigue comprobando igual.
+    """
+    contexto = ssl.create_default_context()
+    contexto.set_ciphers("DEFAULT@SECLEVEL=1")
+    return contexto
 
 
 # --------------------------------------------------------------------------
@@ -148,7 +177,9 @@ class GeoportalClient:
             "User-Agent": self._user_agent,
             "Accept": "application/json",
         }
-        async with httpx.AsyncClient(timeout=self._timeout) as cliente:
+        async with httpx.AsyncClient(
+            timeout=self._timeout, verify=contexto_tls_geoportal()
+        ) as cliente:
             respuesta = await cliente.get(self._url, headers=cabeceras)
             respuesta.raise_for_status()
             crudo = respuesta.content
