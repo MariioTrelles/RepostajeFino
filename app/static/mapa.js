@@ -14,17 +14,36 @@ import { antiguedad, duracion, escapar, euros, eurosLitro, km, litros } from "./
 // para que el más claro siga viéndose sobre el color de los tiles de OSM.
 const RAMPA_PRECIO = ["#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"];
 const COLOR_CADUCADO = "#898781";
-const ANILLO = "#fcfcfb";
 
-const CENTRO_ESPAÑA = [40.2, -3.6];
+// Península y Baleares. Se encaja en vez de centrar a ojo porque la carcasa
+// tapa una franja arriba y otra abajo, y con `setView` España se iba debajo.
+const ESPAÑA = [
+  [36.0, -9.4],
+  [43.9, 4.4],
+];
+const ESCRITORIO = window.matchMedia("(min-width: 900px)");
+const OSCURO = window.matchMedia("(prefers-color-scheme: dark)");
 
-export function crearMapa(idNodo, { alClicar } = {}) {
-  const mapa = L.map(idNodo, { zoomControl: true }).setView(CENTRO_ESPAÑA, 6);
+/**
+ * El anillo de los círculos y el color de la polilínea sí dependen del tema
+ * (un trazo negro no se ve sobre el mapa oscuro), así que se leen del CSS en
+ * vez de estar escritos aquí. La rampa de precios no: eso es dato.
+ */
+function token(nombre) {
+  return getComputedStyle(document.documentElement).getPropertyValue(nombre).trim();
+}
+
+export function crearMapa(idNodo, { alClicar, margenes } = {}) {
+  const mapa = L.map(idNodo, { zoomControl: false });
 
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19,
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
   }).addTo(mapa);
+
+  // En móvil el control de zoom quedaría debajo de la carcasa y además sobra:
+  // el gesto de pellizcar hace lo mismo.
+  if (ESCRITORIO.matches) L.control.zoom({ position: "bottomright" }).addTo(mapa);
 
   // Los iconos por defecto se buscan a partir del CSS; con Leaflet vendorizado
   // conviene decirlo explícitamente en vez de fiarlo a la detección.
@@ -37,10 +56,31 @@ export function crearMapa(idNodo, { alClicar } = {}) {
   // Para que pinchar una opción en el panel abra la del mapa (§8.6).
   const opcionesPorEstacion = new Map();
   const extremos = { origen: null, destino: null };
+  const leyenda = document.querySelector("#leyenda-mapa");
 
   if (alClicar) {
     mapa.on("click", (evento) => alClicar(evento.latlng.lat, evento.latlng.lng));
   }
+
+  /**
+   * El mapa ocupa la pantalla entera y la carcasa flota encima: encajar contra
+   * los bordes del contenedor metería la ruta debajo de la barra o de la hoja.
+   * Estos márgenes son los píxeles que tapa la carcasa en cada lado.
+   */
+  function encaje(extra = 24) {
+    const m = margenes?.() ?? { arriba: 0, abajo: 0, izquierda: 0, derecha: 0 };
+    return {
+      paddingTopLeft: L.point(m.izquierda + extra, m.arriba + extra),
+      paddingBottomRight: L.point(m.derecha + extra, m.abajo + extra),
+    };
+  }
+
+  /** Centrar en un punto, pero en el centro de lo que se ve, no del contenedor. */
+  function centrarEn(latlng, zoom) {
+    mapa.fitBounds(L.latLngBounds(latlng, latlng), { ...encaje(), maxZoom: zoom });
+  }
+
+  mapa.fitBounds(L.latLngBounds(ESPAÑA), encaje(8));
 
   function fijarExtremo(cual, punto, alMover) {
     const posicion = [punto.lat, punto.lon];
@@ -58,13 +98,13 @@ export function crearMapa(idNodo, { alClicar } = {}) {
       });
     }
     extremos[cual].bindTooltip(escapar(punto.etiqueta ?? cual), { direction: "top" });
-    if (!extremos.origen || !extremos.destino) mapa.setView(posicion, 12);
+    if (!extremos.origen || !extremos.destino) centrarEn(posicion, 12);
   }
 
   function encajarExtremos() {
     const puestos = [extremos.origen, extremos.destino].filter(Boolean);
     if (puestos.length === 2) {
-      mapa.fitBounds(L.latLngBounds(puestos.map((m) => m.getLatLng())), { padding: [60, 60] });
+      mapa.fitBounds(L.latLngBounds(puestos.map((m) => m.getLatLng())), encaje(36));
     }
   }
 
@@ -74,20 +114,22 @@ export function crearMapa(idNodo, { alClicar } = {}) {
     capaOpciones.clearLayers();
     capaParadas.clearLayers();
     opcionesPorEstacion.clear();
+    leyenda.hidden = true;
   }
 
   function pintarPlan(datos) {
     limpiarResultado();
 
     const trazado = L.polyline(datos.geometria, {
-      color: "#0b0b0b",
+      color: token("--trazado"),
       weight: 4,
       opacity: 0.55,
     }).addTo(capaRuta);
 
     const cortes = cortesDePrecio(datos.candidatas);
+    const anillo = token("--anillo");
     for (const candidata of datos.candidatas) {
-      marcadorCandidata(candidata, cortes).addTo(capaCandidatas);
+      marcadorCandidata(candidata, cortes, anillo).addTo(capaCandidatas);
     }
     // Las opciones van por encima de las candidatas y por debajo de las paradas:
     // son más que una gasolinera cualquiera y menos que el plan recomendado.
@@ -99,16 +141,40 @@ export function crearMapa(idNodo, { alClicar } = {}) {
       marcadorParada(parada, indice + 1).addTo(capaParadas);
     });
 
-    mapa.fitBounds(trazado.getBounds(), { padding: [40, 40] });
+    pintarLeyenda(datos.candidatas.some((c) => !c.precio.vigente));
+    mapa.fitBounds(trazado.getBounds(), encaje());
+  }
+
+  /** La escala solo aparece cuando hay puntos que explicar. */
+  function pintarLeyenda(hayCaducados) {
+    const escalones = RAMPA_PRECIO.map(
+      (color) => `<span class="muestra" style="background:${color}"></span>`,
+    ).join("");
+    // La fila del precio caducado solo si de verdad hay alguno: explicar un
+    // símbolo que no está en pantalla es ruido.
+    const caducado = hayCaducados
+      ? `<p class="leyenda-nota">
+           <span class="muestra muestra-hueca" style="border-color:${COLOR_CADUCADO}"></span>
+           sin actualizar
+         </p>`
+      : "";
+    leyenda.innerHTML = `
+      <p class="leyenda-escala"><span>barata</span>${escalones}<span>cara</span></p>
+      ${caducado}`;
+    leyenda.hidden = false;
   }
 
   function pintarCercanas(cercanas) {
     limpiarResultado();
     const puntos = [];
+    const anillo = token("--anillo");
     for (const cercana of cercanas) {
       const { estacion, precio, distancia_km } = cercana;
       puntos.push([estacion.lat, estacion.lon]);
-      L.circleMarker([estacion.lat, estacion.lon], estiloCandidata(precio.vigente, RAMPA_PRECIO[1]))
+      L.circleMarker(
+        [estacion.lat, estacion.lon],
+        estiloCandidata(precio.vigente, RAMPA_PRECIO[1], anillo),
+      )
         .bindPopup(
           `<strong>${escapar(estacion.rotulo)}</strong><br>${escapar(estacion.direccion ?? "")}` +
             `<br>${eurosLitro(precio.eur_litro)} · a ${km(distancia_km)} del origen`,
@@ -116,7 +182,7 @@ export function crearMapa(idNodo, { alClicar } = {}) {
         .addTo(capaCandidatas);
     }
     if (puntos.length > 0) {
-      mapa.fitBounds(L.latLngBounds(puntos), { padding: [60, 60], maxZoom: 13 });
+      mapa.fitBounds(L.latLngBounds(puntos), { ...encaje(36), maxZoom: 13 });
     }
   }
 
@@ -124,9 +190,19 @@ export function crearMapa(idNodo, { alClicar } = {}) {
   function enfocarOpcion(estacionId) {
     const marcador = opcionesPorEstacion.get(estacionId);
     if (!marcador) return;
-    mapa.setView(marcador.getLatLng(), Math.max(mapa.getZoom(), 11));
+    centrarEn(marcador.getLatLng(), Math.max(mapa.getZoom(), 13));
     marcador.openPopup();
   }
+
+  // El usuario puede cambiar el tema del sistema con el resultado en pantalla:
+  // el trazo y los anillos se repintan sin tener que volver a calcular.
+  OSCURO.addEventListener("change", () => {
+    const anillo = token("--anillo");
+    capaRuta.eachLayer((capa) => capa.setStyle?.({ color: token("--trazado") }));
+    capaCandidatas.eachLayer((capa) => {
+      if (capa.options.fillOpacity === 1) capa.setStyle({ color: anillo });
+    });
+  });
 
   return {
     mapa,
@@ -155,7 +231,7 @@ function colorDePrecio(precio, cortes) {
   return RAMPA_PRECIO[paso];
 }
 
-function marcadorCandidata(candidata, cortes) {
+function marcadorCandidata(candidata, cortes, anillo) {
   const { estacion, precio } = candidata;
   const color = precio.vigente
     ? colorDePrecio(candidata.precio_efectivo_eur_litro, cortes)
@@ -167,7 +243,7 @@ function marcadorCandidata(candidata, cortes) {
 
   return L.circleMarker(
     [estacion.lat, estacion.lon],
-    estiloCandidata(precio.vigente, color),
+    estiloCandidata(precio.vigente, color, anillo),
   ).bindPopup(
     `<strong>${escapar(estacion.rotulo)}</strong><br>` +
       `${escapar(estacion.direccion ?? "")}${estacion.municipio ? `<br>${escapar(estacion.municipio)}` : ""}` +
@@ -180,10 +256,10 @@ function marcadorCandidata(candidata, cortes) {
  * y con el borde discontinuo. Color a secas nunca debe cargar con un dato (§4.2
  * ya pide marcarlo de forma explícita, no sutil).
  */
-function estiloCandidata(vigente, color) {
+function estiloCandidata(vigente, color, anillo) {
   return {
     radius: 6,
-    color: vigente ? ANILLO : color,
+    color: vigente ? anillo : color,
     weight: 2,
     dashArray: vigente ? null : "3 3",
     fillColor: color,
@@ -252,5 +328,6 @@ function iconoExtremo(cual) {
   });
 }
 
-export const LEYENDA_PRECIO = RAMPA_PRECIO;
-export const LEYENDA_CADUCADO = COLOR_CADUCADO;
+// `LEYENDA_PRECIO` y `LEYENDA_CADUCADO` ya no se exportan: la leyenda la pinta
+// este módulo, así que la rampa deja de salir de aquí y panel.js deja de
+// depender del mapa para explicar unos colores que no elige.

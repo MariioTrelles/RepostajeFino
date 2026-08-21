@@ -276,12 +276,19 @@ class TramoOut(BaseModel):
 class OpcionOut(BaseModel):
     """Una gasolinera donde el conductor puede elegir parar, con lo que le cuesta.
 
-    ``sobrecoste_eur`` son euros de combustible del viaje entero respecto al plan
-    óptimo. El tiempo va en minutos y solo en minutos (§8.2).
+    ``coste_viaje_eur`` es lo que cuesta el viaje entero parando ahí y
+    ``sobrecoste_eur`` es lo que eso encarece respecto al plan óptimo. El tiempo
+    va en minutos y solo en minutos (§8.2).
 
     Puede que ninguna opción tenga sobrecoste cero: el plan óptimo es libre de
     repartir el repostaje en dos paradas y salir más barato que cualquier parada
-    única. ``es_la_mas_barata`` marca la mejor de las ofrecidas.
+    única. ``es_la_mas_barata`` marca la mejor de las ofrecidas, que es la mejor
+    *alternativa*, no la opción más barata que existe.
+
+    Por eso la interfaz enseña **las dos cifras**: el coste total manda en cada
+    fila y el sobrecoste va debajo, con el precio del plan de titular siempre a la
+    vista (§13.3). Enseñar solo el sobrecoste dejaba al usuario sin el número
+    contra el que se compara, porque ese número no está en la lista.
     """
 
     estacion: EstacionOut

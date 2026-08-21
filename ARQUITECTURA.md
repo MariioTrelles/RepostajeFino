@@ -1304,8 +1304,10 @@ app/static/
 ├── geocoder.js     # buscar(texto, cerca) -> [{etiqueta, lat, lon}] — §13.2
 ├── mapa.js         # Leaflet: polilínea, capas, marcadores, popups
 ├── panel.js        # formulario, buscador, plan y opciones
+├── hoja.js         # la carcasa: hoja arrastrable, pestañas y márgenes del mapa
 ├── formato.js      # euros, litros, km y duraciones; lo comparten panel y mapa
 ├── estilos.css
+├── logo.jpg        # copia de SmallSquareLogoJpg.jpg: el mount solo sirve esto
 └── vendor/leaflet/ # 1.9.4, con sus imágenes
 ```
 
@@ -1313,10 +1315,84 @@ El catálogo del desplegable de combustibles lo sirve `GET /api/combustibles`,
 por el mismo motivo que `/marcas` (§6): que la UI no mantenga su propia copia de
 los códigos y se desincronice con la ingesta.
 
-**Una sola pantalla, sin router.** Mapa a toda la ventana y panel lateral
-(~380 px) que en pantalla estrecha pasa a hoja inferior. El panel tiene tres
-estados —formulario, esperando, resultado— y el error ocupa el sitio del
-resultado, nunca un `alert`.
+**Una sola pantalla, sin router.** El modelo es el de una app de mapas de móvil,
+porque de móvil va a venir la mayoría: **el mapa ocupa la ventana entera** y la
+interfaz flota encima en dos piezas.
+
+- **Barra superior**, siempre visible: logotipo, origen y destino con el hilo que
+  los une, la chincheta que dice cuál fija el próximo clic y el botón de dar la
+  vuelta al viaje.
+- **Hoja inferior** arrastrable, con tres escalones (`peek`, `medio`, `alto`) más
+  una altura `auto` para las pantallas que miden lo que miden. `alto` se topa
+  contra la barra a propósito: si la hoja se le metiera detrás, el asa dejaría de
+  poder agarrarse. En ≥900 px las dos piezas se apilan en una tarjeta a la
+  izquierda y el arrastre se desactiva; es el mismo DOM.
+
+Los cuatro estados siguen siendo los de siempre —formulario, esperando, resultado
+y error—, y el error sigue ocupando el sitio del resultado, nunca un `alert`. Lo
+que cambia es que ahora cada estado trae su juego de pestañas y su botón de pie:
+
+| estado | pestañas | pie | altura |
+|---|---|---|---|
+| formulario | Vehículo · Marcas · Ajustes | `Calcular ruta óptima` | `medio` |
+| esperando | — | — | `auto` |
+| resultado | El plan · Alternativas | `Cambiar los datos` | `medio` |
+| error | — | los suyos, dentro | `auto` |
+
+Las pestañas de la tabla son **candidatas, no una lista fija**: `hoja.js` monta
+solo las de los paneles que existan en el DOM, y si queda una sola no monta
+ninguna. Así, cuando no hace falta repostar, `panel.js` no pinta
+`#panel-alternativas` y la pestaña desaparece sin que la carcasa sepa nada del
+dominio.
+
+`panel.mostrarVista()` avisa con el evento `vista:cambiada` y `hoja.js` reacciona.
+Un evento y no una llamada directa para que `panel.js` no tenga que importar la
+carcasa —y para que la carcasa pueda leer lo que `panel.js` acaba de pintar.
+
+#### El titular es la referencia (reescrito el 21/08/2026)
+
+La cifra en euros vive en `#hoja-resumen`, fuera del cuerpo con scroll y por
+encima de las pestañas: lo que el usuario ha venido a ver no se esconde detrás de
+una pestaña. De ahí sale también el alto del escalón `peek`, que se mide en vez
+de fijarse (`--alto-peek`).
+
+Pero además **es el punto de comparación de toda la pantalla**, y por eso lleva
+encima una ceja que lo dice: *"el plan más barato"*. El diseño anterior partía el
+resultado en tres pestañas (Opciones / Plan / Datos) y enseñaba en la lista solo
+el `sobrecoste_eur`. Eso era ilegible por una razón que no es de maquetación: el
+plan óptimo puede repartir el repostaje en varias paradas y **salir más barato
+que cualquier alternativa de parada única**, así que ninguna opción marcaba
+"+0,00 €" y el usuario no tenía forma de ver contra qué se comparaba. Encima, la
+mejor de la lista se etiquetaba "la más barata", que era falso.
+
+Ahora:
+
+- El titular, siempre visible desde las dos pestañas, es el plan y su precio.
+- Cada alternativa enseña **su precio total del viaje** como cifra principal y el
+  sobrecoste debajo. La fila se basta sola, y `total − titular = sobrecoste` es
+  una resta que el usuario puede hacer con los dos números en pantalla. Ese
+  invariante es lo que hay que proteger si esta pantalla se vuelve a tocar.
+- La mejor alternativa se marca como **"la mejor alternativa"**, no como "la más
+  barata": la más barata es el plan.
+
+La leyenda de la escala de precios se fue a una píldora flotando sobre el mapa
+(`#leyenda-mapa`, la pinta `mapa.js`): explica los colores al lado de los puntos
+que colorea, deja de gastar una pestaña entera y de paso `panel.js` deja de
+importar de `mapa.js`. Las atribuciones viven solo en la pestaña Ajustes.
+
+**Márgenes del mapa.** Con el mapa a pantalla completa, encajar la ruta contra los
+bordes del contenedor la metería debajo de la carcasa. `hoja.margenes()` dice
+cuántos píxeles tapa cada lado y `mapa.js` los usa en todos sus `fitBounds`. Por
+eso el orden en `app.js` es pintar el panel → enseñarlo (que recoloca la hoja) →
+pintar el mapa.
+
+**Color.** El acento es el naranja del logotipo (`--marca-color`). La rampa de
+precios del mapa sigue siendo azul y no se toca: es dato, no decoración, y un
+azul de marca competiría con ella. Hay modo oscuro siguiendo el del sistema; en
+él se invierte **solo** `.leaflet-tile-pane`, que es donde viven los tiles: los
+marcadores y la polilínea están en otros panes y conservan su color. `--trazado`
+y `--anillo` sí cambian con el tema, porque un trazo negro no se ve sobre un mapa
+oscuro, y `mapa.js` los lee del CSS en vez de llevarlos escritos.
 
 El `Vehiculo` se guarda en `localStorage`, que es exactamente lo que §3 previó al
 decidir stateless: el servidor no recuerda nada y el navegador no obliga a

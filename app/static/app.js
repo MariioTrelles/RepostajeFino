@@ -7,10 +7,12 @@
 
 import * as api from "./api.js";
 import * as panel from "./panel.js";
+import { crearHoja } from "./hoja.js";
 import { crearMapa } from "./mapa.js";
 
 const CLAVE_GUARDADO = "repostaje-fino:formulario";
 const MARGEN_MAXIMO_KM = 50;
+const ESCRITORIO = window.matchMedia("(min-width: 900px)");
 
 const estado = {
   origen: null,
@@ -20,7 +22,10 @@ const estado = {
   enCurso: null,
 };
 
-const mapa = crearMapa("mapa", { alClicar: fijarDesdeMapa });
+// La hoja primero: el mapa necesita sus márgenes para encajar la ruta en el
+// hueco que queda a la vista y no debajo de la carcasa.
+const hoja = crearHoja();
+const mapa = crearMapa("mapa", { alClicar: fijarDesdeMapa, margenes: hoja.margenes });
 
 const campos = {
   origen: panel.crearCampoBusqueda(document.querySelector('[data-punto="origen"]'), {
@@ -79,6 +84,14 @@ function alArrastrar(cual, lat, lon) {
   fijarPunto(cual, { lat, lon, etiqueta: coordenadas({ lat, lon }) });
 }
 
+/** Da la vuelta al viaje. Con un solo extremo puesto no hay nada que voltear. */
+function intercambiar() {
+  const { origen, destino } = estado;
+  if (!origen || !destino) return;
+  fijarPunto("origen", destino);
+  fijarPunto("destino", origen);
+}
+
 function coordenadas({ lat, lon }) {
   return `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
 }
@@ -91,11 +104,16 @@ function actualizarArmado() {
   }
 }
 
-document.querySelector("#panel").addEventListener("click", (evento) => {
+// La carcasa entera: la barra de arriba y la hoja de abajo son hermanas, y las
+// pantallas de resultado y de error se pintan con `innerHTML`.
+document.body.addEventListener("click", (evento) => {
   // Elegir dónde parar es lo que el usuario ha venido a hacer: que pinchar una
   // opción de la lista la enseñe en el mapa (§8.6).
   const opcion = evento.target.closest(".opcion");
   if (opcion) {
+    // En móvil, con la hoja alta, la gasolinera quedaría justo debajo: bajarla
+    // es parte de enseñarla.
+    if (!ESCRITORIO.matches) hoja.irA("peek");
     mapa.enfocarOpcion(Number(opcion.dataset.estacion));
     return;
   }
@@ -106,8 +124,10 @@ document.querySelector("#panel").addEventListener("click", (evento) => {
   if (boton.classList.contains("fijar-en-mapa")) {
     estado.armado = boton.dataset.fijar;
     actualizarArmado();
-  } else if (boton.id === "volver") {
+  } else if (boton.classList.contains("volver")) {
     panel.mostrarVista("formulario");
+  } else if (boton.id === "intercambiar") {
+    intercambiar();
   } else if (boton.id === "reintentar") {
     if (estado.ultimaPeticion) enviar(estado.ultimaPeticion);
   } else if (boton.id === "ensanchar") {
@@ -160,20 +180,23 @@ async function enviar(peticion) {
     `El servidor público va a 1 petición por segundo, así que cuantas más, más tarda.`;
   panel.mostrarVista("espera");
 
+  // El orden importa: primero se pinta el panel, luego se enseña (que es lo que
+  // recoloca la hoja) y solo entonces el mapa, que encaja la ruta contra los
+  // márgenes que la carcasa acaba de dejar libres.
   try {
     const datos = await api.rutaOptima(peticion, estado.enCurso.signal);
-    mapa.pintarPlan(datos);
     panel.pintarResultado(datos);
     panel.mostrarVista("resultado");
+    mapa.pintarPlan(datos);
   } catch (error) {
     if (error.name === "AbortError") return;
+    panel.pintarError(error, { margenSugerido: margenEnsanchado(peticion.margen_corredor_km) });
+    panel.mostrarVista("error");
     if (error.tipo === "bajo_reserva") {
       mapa.pintarCercanas(error.datos.estaciones_cercanas ?? []);
     } else {
       mapa.limpiarResultado();
     }
-    panel.pintarError(error, { margenSugerido: margenEnsanchado(peticion.margen_corredor_km) });
-    panel.mostrarVista("error");
   } finally {
     estado.enCurso = null;
   }

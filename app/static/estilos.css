@@ -1,23 +1,76 @@
 /*
- * Un solo tema claro, a juego con los tiles de OSM: una interfaz oscura al lado
- * de un mapa claro se ve peor, no mejor. Los colores son variables para que
- * añadir modo oscuro más adelante sea un bloque, no una revisión entera.
+ * El mapa es el fondo y la interfaz flota encima: barra de origen y destino
+ * arriba, hoja arrastrable abajo (tarjeta a la izquierda en escritorio).
+ *
+ * Dos temas, claro y oscuro, siguiendo el del sistema. La rampa de precios del
+ * mapa vive en mapa.js y no cambia con el tema: es dato, no decoración. Lo que
+ * sí cambia son `--trazado` y `--anillo`, que mapa.js lee de aquí.
  */
 
 :root {
-  --plano: #f9f9f7;
-  --superficie: #fcfcfb;
-  --tinta: #0b0b0b;
-  --tinta-2: #52514e;
-  --tinta-apagada: #898781;
-  --linea: #e1e0d9;
-  --borde: rgba(11, 11, 11, 0.12);
-  --acento: #256abf;
-  --acento-fuerte: #184f95;
+  color-scheme: light dark;
+
+  --marca-color: #f28322; /* el naranja del logo */
+  --marca-fuerte: #d2691e;
+  --marca-suave: #fdf0e2;
+
+  --plano: #fbf8f4;
+  --superficie: #ffffff;
+  --superficie-2: #f5f2ed;
+  --tinta: #14110f;
+  --tinta-2: #55504a;
+  --tinta-apagada: #8b857d;
+  --linea: #eae5dd;
+  --borde: rgba(20, 17, 15, 0.12);
   --atencion: #fab219;
+  --atencion-fondo: #fdf6e3;
   --critico: #d03b3b;
-  --radio: 8px;
-  --tipografia: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --critico-fondo: #fbecec;
+
+  --trazado: #14110f; /* polilínea de la ruta; la lee mapa.js */
+  --anillo: #ffffff; /* borde de los círculos de candidata */
+
+  --radio: 12px;
+  --radio-grande: 20px;
+  --radio-pildora: 999px;
+  --sombra-1: 0 1px 3px rgba(20, 17, 15, 0.1), 0 6px 20px rgba(20, 17, 15, 0.08);
+  --sombra-2: 0 -2px 8px rgba(20, 17, 15, 0.06), 0 -14px 36px rgba(20, 17, 15, 0.12);
+
+  --tipografia: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* Alto de la barra superior, que mide hoja.js: la hoja de escritorio se
+     cuelga justo debajo y el mapa encaja la ruta por debajo de ella. */
+  --barra-alto: 120px;
+  --alto-peek: calc(148px + env(safe-area-inset-bottom, 0px));
+  --curva: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --marca-suave: #3a2612;
+    --plano: #14120f;
+    --superficie: #1c1a17;
+    --superficie-2: #26231f;
+    --tinta: #f5f2ed;
+    --tinta-2: #b9b2a8;
+    --tinta-apagada: #8b857d;
+    --linea: #332f2a;
+    --borde: rgba(245, 242, 237, 0.14);
+    --atencion-fondo: #3a2f14;
+    --critico-fondo: #3a1d1d;
+    --trazado: #f5f2ed;
+    --anillo: #1c1a17;
+    --sombra-1: 0 1px 3px rgba(0, 0, 0, 0.5), 0 6px 20px rgba(0, 0, 0, 0.4);
+    --sombra-2: 0 -2px 8px rgba(0, 0, 0, 0.35), 0 -14px 36px rgba(0, 0, 0, 0.5);
+  }
+
+  /* Solo el panel de tiles. Los marcadores y la polilínea viven en otros panes
+     de Leaflet y conservan su color, que es lo que codifica el precio. */
+  .leaflet-tile-pane {
+    /* El `saturate` es para las carreteras: invertidas se vuelven rosa chillón
+       y le comen el sitio a los círculos de precio, que sí son dato. */
+    filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.9) saturate(0.7);
+  }
 }
 
 * {
@@ -28,139 +81,516 @@ html,
 body {
   height: 100%;
   margin: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 body {
-  display: flex;
   font-family: var(--tipografia);
+  font-size: 15px;
+  line-height: 1.5;
   color: var(--tinta);
   background: var(--plano);
+  -webkit-tap-highlight-color: transparent;
 }
 
 #mapa {
-  flex: 1;
-  height: 100%;
+  position: fixed;
+  inset: 0;
   z-index: 0;
+  background: var(--plano);
 }
 
-#panel {
-  width: 400px;
-  flex-shrink: 0;
-  height: 100%;
-  overflow-y: auto;
+/* Solo para lectores de pantalla: la información sigue ahí, ocupando cero. */
+.solo-lectores {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ========================================================================== */
+/* Barra superior                                                             */
+/* ========================================================================== */
+
+#barra-superior {
+  position: fixed;
+  z-index: 600;
+  top: calc(8px + env(safe-area-inset-top, 0px));
+  left: 8px;
+  right: 8px;
+  padding: 10px 12px 12px;
   background: var(--superficie);
-  border-left: 1px solid var(--borde);
-  padding: 20px;
-  font-size: 14px;
-  line-height: 1.5;
+  border-radius: var(--radio-grande);
+  box-shadow: var(--sombra-1);
 }
 
-/* --- cabecera y pie ------------------------------------------------------ */
+.logotipo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  text-decoration: none;
+  color: var(--tinta);
+}
 
-.cabecera h1 {
-  margin: 0;
-  font-size: 20px;
+/* El logo es un JPG cuadrado con el surtidor arriba y el nombre abajo: a este
+   tamaño el nombre no se leería, así que se recorta al surtidor y el nombre se
+   pone al lado como texto. El chip blanco es porque el JPG no tiene alfa. */
+.logotipo-icono {
+  display: block;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  overflow: hidden;
+  background: #fff;
+  border-radius: 8px;
+}
+
+.logotipo-icono img {
+  width: 100%;
+  height: 138%;
+  object-fit: cover;
+  object-position: top center;
+  display: block;
+}
+
+.logotipo-texto {
+  font-size: 15px;
+  font-weight: 500;
   letter-spacing: -0.01em;
-}
-
-.lema,
-.pie {
   color: var(--tinta-2);
-  font-size: 12.5px;
 }
 
-.lema {
-  margin: 2px 0 18px;
+.logotipo-texto b {
+  font-weight: 700;
+  color: var(--marca-color);
 }
 
-.pie {
-  margin-top: 28px;
-  padding-top: 12px;
-  border-top: 1px solid var(--linea);
-  color: var(--tinta-apagada);
-  font-size: 11.5px;
+/* Origen y destino, con el hilo que los une a la izquierda. */
+.campos {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) 44px;
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 8px;
 }
 
-/* --- formulario ---------------------------------------------------------- */
+.conector {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  align-self: stretch;
+  padding: 16px 0;
+}
 
-fieldset {
-  border: 1px solid var(--linea);
+.conector-punto,
+.conector-meta {
+  flex-shrink: 0;
+  width: 9px;
+  height: 9px;
+  background: var(--tinta-apagada);
+}
+
+.conector-punto {
+  border-radius: 50%;
+}
+
+.conector-meta {
+  border-radius: 2px;
+  background: var(--marca-color);
+}
+
+.conector-linea {
+  flex: 1;
+  width: 0;
+  min-height: 12px;
+  margin: 4px 0;
+  border-left: 2px dotted var(--linea);
+}
+
+.campo-busqueda {
+  position: relative;
+  grid-column: 2;
+  min-width: 0;
+}
+
+.campo-busqueda[data-punto="origen"] {
+  grid-row: 1;
+}
+
+.campo-busqueda[data-punto="destino"] {
+  grid-row: 2;
+}
+
+.fila-entrada {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--superficie-2);
+  border: 1px solid transparent;
   border-radius: var(--radio);
-  padding: 12px 14px 16px;
-  margin: 0 0 14px;
 }
 
-legend {
-  padding: 0 6px;
-  font-weight: 600;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--tinta-2);
+.fila-entrada:focus-within {
+  border-color: var(--marca-color);
+  background: var(--superficie);
 }
+
+.fila-entrada input {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  padding: 0 4px 0 12px;
+  font: inherit;
+  /* 16px o menos: por debajo de eso iOS hace zoom al enfocar y descoloca todo. */
+  font-size: 16px;
+  color: var(--tinta);
+  background: none;
+  border: 0;
+  outline: none;
+}
+
+.fila-entrada input::placeholder {
+  color: var(--tinta-apagada);
+}
+
+.fijar-en-mapa {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  margin-right: 2px;
+  padding: 0;
+  color: var(--tinta-apagada);
+  background: none;
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.fijar-en-mapa svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* Cuál de los dos fija el próximo clic en el mapa. */
+.fijar-en-mapa[aria-pressed="true"] {
+  color: var(--marca-color);
+  background: var(--marca-suave);
+}
+
+#intercambiar {
+  grid-column: 3;
+  grid-row: 1 / 3;
+  justify-self: center;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  color: var(--tinta-2);
+  background: none;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+#intercambiar svg {
+  width: 20px;
+  height: 20px;
+}
+
+#intercambiar:hover {
+  background: var(--superficie-2);
+}
+
+/* --- sugerencias del buscador -------------------------------------------- */
+
+.sugerencias {
+  position: absolute;
+  z-index: 700;
+  left: 0;
+  right: 0;
+  margin: 6px 0 0;
+  padding: 6px;
+  list-style: none;
+  background: var(--superficie);
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+  box-shadow: var(--sombra-1);
+  max-height: min(320px, 50dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.sugerencias li {
+  padding: 10px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.sugerencias li.activa,
+.sugerencias li:hover {
+  background: var(--superficie-2);
+}
+
+.sugerencia-principal {
+  display: block;
+}
+
+.sugerencia-secundaria {
+  display: block;
+  font-size: 12.5px;
+  color: var(--tinta-apagada);
+}
+
+.estado-busqueda,
+.coordenada {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--tinta-apagada);
+  font-variant-numeric: tabular-nums;
+}
+
+.estado-busqueda:empty,
+.coordenada:empty {
+  display: none;
+}
+
+/* ========================================================================== */
+/* La hoja                                                                    */
+/* ========================================================================== */
+
+#hoja {
+  position: fixed;
+  z-index: 400;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--hoja-alto, 52dvh);
+  display: flex;
+  flex-direction: column;
+  background: var(--superficie);
+  border-radius: var(--radio-grande) var(--radio-grande) 0 0;
+  box-shadow: var(--sombra-2);
+  transition: height 0.26s var(--curva);
+}
+
+/* Tres posiciones. `peek` deja a la vista el asa, las pestañas y el botón:
+   lo justo para saber qué hay debajo y poder calcular sin desplegar nada. */
+#hoja[data-snap="peek"] {
+  --hoja-alto: var(--alto-peek);
+}
+
+/* Nunca por debajo de `peek`: si no, el escalón intermedio sería un escalón
+   hacia abajo. `--alto-peek` lo mide hoja.js. */
+#hoja[data-snap="medio"] {
+  --hoja-alto: max(52dvh, calc(var(--alto-peek) + 60px));
+}
+
+/* Nunca por debajo de la barra: si la hoja se le mete detrás, el asa deja de
+   poder agarrarse y no hay forma de volver a bajarla. */
+#hoja[data-snap="alto"] {
+  --hoja-alto: calc(100dvh - var(--barra-alto) - 28px);
+}
+
+/* La espera y los errores no tienen un largo fijo: un `bajo_reserva` con cinco
+   gasolineras ocupa lo suyo y un «no responde» son tres líneas. Que la hoja
+   mida lo que mide su contenido evita el hueco muerto debajo del botón. */
+#hoja[data-snap="auto"] {
+  height: auto;
+  max-height: calc(100dvh - var(--barra-alto) - 28px);
+}
+
+/* Mientras el dedo manda, el alto lo pone el JS y no hay transición. */
+#hoja[data-arrastrando] {
+  transition: none;
+}
+
+#asa {
+  flex-shrink: 0;
+  display: block;
+  width: 100%;
+  height: 26px;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: var(--radio-grande) var(--radio-grande) 0 0;
+  cursor: grab;
+  touch-action: none;
+}
+
+#asa::before {
+  content: "";
+  display: block;
+  width: 40px;
+  height: 4px;
+  margin: 11px auto;
+  background: var(--linea);
+  border-radius: 2px;
+}
+
+#hoja[data-arrastrando] #asa {
+  cursor: grabbing;
+}
+
+/* --- pestañas ------------------------------------------------------------- */
+
+#pestanas {
+  flex-shrink: 0;
+  display: flex;
+  gap: 2px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--linea);
+}
+
+#pestanas:empty {
+  display: none;
+}
+
+.pestana {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  padding: 0 4px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--tinta-2);
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  /* Sin el radio heredado de `button`: con solo borde inferior, las esquinas
+     redondeadas convierten el subrayado en una bañera. */
+  border-radius: 0;
+  margin-bottom: -1px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pestana[aria-selected="true"] {
+  color: var(--marca-color);
+  border-bottom-color: var(--marca-color);
+  font-weight: 600;
+}
+
+#hoja-cuerpo {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  /* El hueco de abajo lo lleva el cuerpo y no solo el pie: en la espera y en
+     los errores el pie no existe y los botones irían pegados al borde. */
+  padding: 14px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+}
+
+#hoja-pie {
+  flex-shrink: 0;
+  padding: 10px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+  background: var(--superficie);
+  border-top: 1px solid var(--linea);
+}
+
+/* Sin nada que ofrecer, el pie no ocupa: los errores traen sus propios botones
+   dentro del cuerpo. */
+#hoja-pie:not(:has(> :not([hidden]))) {
+  display: none;
+}
+
+/* --- resumen del resultado ------------------------------------------------ */
+
+#hoja-resumen {
+  flex-shrink: 0;
+  touch-action: none; /* también es tirador de la hoja */
+}
+
+#hoja-resumen:not(:empty) {
+  padding: 4px 16px 14px;
+  cursor: grab;
+}
+
+/* ========================================================================== */
+/* Controles                                                                  */
+/* ========================================================================== */
 
 label {
   display: block;
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--tinta-2);
   margin-bottom: 4px;
+}
+
+label.ancho {
+  margin-bottom: 6px;
 }
 
 .unidad {
   color: var(--tinta-apagada);
 }
 
-input[type="text"],
 input[type="number"],
 select {
   width: 100%;
-  padding: 8px 10px;
+  height: 44px;
+  padding: 0 10px;
   font: inherit;
-  font-size: 14px;
+  font-size: 16px; /* iOS: por debajo de 16px hace zoom al enfocar */
   color: var(--tinta);
-  background: var(--superficie);
-  border: 1px solid var(--borde);
-  border-radius: 6px;
+  background: var(--superficie-2);
+  border: 1px solid transparent;
+  border-radius: 10px;
 }
 
 input[type="number"] {
   font-variant-numeric: tabular-nums;
 }
 
+input[type="number"]:focus,
+select:focus {
+  background: var(--superficie);
+  border-color: var(--marca-color);
+}
+
+select {
+  appearance: none;
+  padding-right: 30px;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 17px) 20px, calc(100% - 12px) 20px;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
 input:focus-visible,
 select:focus-visible,
 button:focus-visible,
-summary:focus-visible {
-  outline: 2px solid var(--acento);
-  outline-offset: 1px;
+a:focus-visible,
+[role="tab"]:focus-visible {
+  outline: 2px solid var(--marca-color);
+  outline-offset: 2px;
 }
 
 .rejilla {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 10px;
+  gap: 12px;
 }
 
 .rejilla label {
   margin: 0;
-}
-
-details {
-  border: 1px solid var(--linea);
-  border-radius: var(--radio);
-  padding: 10px 14px;
-  margin-bottom: 14px;
-}
-
-summary {
-  cursor: pointer;
-  font-weight: 600;
-  font-size: 12.5px;
-  color: var(--tinta-2);
-}
-
-details[open] summary {
-  margin-bottom: 10px;
 }
 
 .marcas {
@@ -172,127 +602,68 @@ details[open] summary {
 .marca {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
+  min-height: 40px;
   margin: 0;
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--tinta);
+  cursor: pointer;
 }
 
 .marca input {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
   margin: 0;
+  accent-color: var(--marca-color);
 }
 
 button {
   font: inherit;
   cursor: pointer;
-  border-radius: 6px;
+  border-radius: 10px;
+}
+
+button.principal,
+button.secundario {
+  width: 100%;
+  min-height: 48px;
+  padding: 12px;
+  font-weight: 600;
+  border-radius: var(--radio);
 }
 
 button.principal {
-  width: 100%;
-  padding: 11px;
-  margin-top: 4px;
-  font-weight: 600;
   color: #fff;
-  background: var(--acento);
-  border: 1px solid var(--acento-fuerte);
+  background: var(--marca-color);
+  border: 0;
 }
 
 button.principal:hover {
-  background: var(--acento-fuerte);
+  background: var(--marca-fuerte);
+}
+
+button.principal:active {
+  transform: scale(0.99);
 }
 
 button.secundario {
-  width: 100%;
-  padding: 9px;
-  margin-top: 8px;
   color: var(--tinta-2);
-  background: var(--superficie);
-  border: 1px solid var(--borde);
+  background: var(--superficie-2);
+  border: 0;
 }
 
 button.secundario:hover {
-  background: var(--plano);
+  background: var(--linea);
 }
 
-/* --- buscador de direcciones --------------------------------------------- */
-
-.campo-busqueda {
-  position: relative;
-  margin-bottom: 12px;
+#hoja-pie button + button {
+  margin-top: 8px;
 }
 
-.fila-entrada {
-  display: flex;
-  gap: 6px;
-}
-
-.fijar-en-mapa {
-  flex-shrink: 0;
-  padding: 0 10px;
-  font-size: 12px;
-  color: var(--tinta-2);
-  background: var(--plano);
-  border: 1px solid var(--borde);
-}
-
-.fijar-en-mapa[aria-pressed="true"] {
-  color: #fff;
-  background: var(--acento);
-  border-color: var(--acento-fuerte);
-}
-
-.sugerencias {
-  position: absolute;
-  z-index: 500;
-  left: 0;
-  right: 0;
-  margin: 2px 0 0;
-  padding: 4px;
-  list-style: none;
-  background: var(--superficie);
-  border: 1px solid var(--borde);
-  border-radius: var(--radio);
-  box-shadow: 0 8px 24px rgba(11, 11, 11, 0.12);
-  max-height: 260px;
-  overflow-y: auto;
-}
-
-.sugerencias li {
-  padding: 7px 9px;
-  border-radius: 5px;
-  cursor: pointer;
-}
-
-.sugerencias li.activa,
-.sugerencias li:hover {
-  background: var(--plano);
-}
-
-.sugerencia-principal {
-  display: block;
-}
-
-.sugerencia-secundaria {
-  display: block;
-  font-size: 12px;
-  color: var(--tinta-apagada);
-}
-
-.estado-busqueda:empty,
-.coordenada:empty {
-  display: none;
-}
-
-.estado-busqueda,
-.coordenada {
-  margin: 4px 0 0;
-  font-size: 11.5px;
-  color: var(--tinta-apagada);
-  font-variant-numeric: tabular-nums;
-}
-
-/* --- espera -------------------------------------------------------------- */
+/* ========================================================================== */
+/* Espera                                                                     */
+/* ========================================================================== */
 
 .barra {
   height: 4px;
@@ -305,7 +676,7 @@ button.secundario:hover {
   display: block;
   width: 40%;
   height: 100%;
-  background: var(--acento);
+  background: var(--marca-color);
   border-radius: 2px;
   animation: avance 1.4s ease-in-out infinite;
 }
@@ -319,43 +690,48 @@ button.secundario:hover {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .barra span {
-    width: 100%;
-    animation: none;
-  }
-}
+/* ========================================================================== */
+/* Resultado                                                                  */
+/* ========================================================================== */
 
-/* --- resultado ----------------------------------------------------------- */
-
-.cifra {
-  margin: 4px 0 16px;
+/* La ceja del titular: dice qué es la cifra que viene debajo. Es lo que
+   convierte el número en la referencia contra la que se leen los sobrecostes
+   de la pestaña de alternativas. */
+.cifra-ceja {
+  margin: 0 0 2px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--marca-color);
 }
 
 .cifra-valor {
   display: block;
   font-size: 34px;
-  font-weight: 600;
+  font-weight: 700;
+  line-height: 1.1;
   letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
 }
 
 .cifra-etiqueta {
   color: var(--tinta-2);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .fila-datos {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 10px;
-  margin: 0 0 14px;
-  padding: 12px;
-  background: var(--plano);
-  border-radius: var(--radio);
+  margin: 12px 0 0;
 }
 
 .fila-datos div {
   min-width: 0;
+  padding: 8px 10px;
+  background: var(--superficie-2);
+  border-radius: 10px;
 }
 
 .fila-datos dt {
@@ -371,22 +747,34 @@ button.secundario:hover {
 }
 
 .titulo-seccion {
-  margin: 20px 0 8px;
+  margin: 18px 0 8px;
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--tinta-2);
 }
 
+.panel > .titulo-seccion:first-child {
+  margin-top: 0;
+}
+
 .titulo-aviso {
   margin: 0 0 8px;
-  font-size: 17px;
+  font-size: 18px;
 }
 
 .apunte {
   margin: 8px 0;
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--tinta-2);
+}
+
+.pie {
+  margin: 24px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--linea);
+  color: var(--tinta-apagada);
+  font-size: 12px;
 }
 
 .paradas,
@@ -400,8 +788,8 @@ button.secundario:hover {
 .paradas li,
 .cercanas li {
   display: flex;
-  gap: 10px;
-  padding: 10px 0;
+  gap: 12px;
+  padding: 12px 0;
   border-top: 1px solid var(--linea);
 }
 
@@ -411,14 +799,14 @@ button.secundario:hover {
 
 .numero-parada {
   flex-shrink: 0;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   margin-top: 2px;
   font-size: 12px;
-  font-weight: 600;
-  line-height: 22px;
+  font-weight: 700;
+  line-height: 24px;
   text-align: center;
-  color: #fff;
+  color: var(--superficie);
   background: var(--tinta);
   border-radius: 50%;
 }
@@ -435,7 +823,7 @@ button.secundario:hover {
 .parada-lugar,
 .parada-detalle {
   margin: 1px 0 0;
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--tinta-apagada);
 }
 
@@ -444,23 +832,23 @@ button.secundario:hover {
   font-variant-numeric: tabular-nums;
 }
 
-/* Opciones: dónde puede elegir parar el conductor (§8.6). */
+/* --- opciones: dónde puede elegir parar el conductor (§8.6) --------------- */
 
 .opcion {
-  padding: 10px 8px;
-  margin: 0 -8px;
+  padding: 12px 10px;
+  margin: 0 -10px;
   border-top: 1px solid var(--linea);
-  border-radius: 6px;
+  border-radius: 10px;
   cursor: pointer;
 }
 
 .opcion:hover,
 .opcion:focus-visible {
-  background: var(--fondo-suave, rgba(0, 0, 0, 0.035));
+  background: var(--superficie-2);
 }
 
 .opcion-optima {
-  box-shadow: inset 3px 0 0 var(--tinta);
+  box-shadow: inset 3px 0 0 var(--marca-color);
 }
 
 .opcion-cabecera {
@@ -486,55 +874,118 @@ button.secundario:hover {
   white-space: nowrap;
 }
 
-/* El sobrecoste es la cifra que hace elegir: va alineada a la derecha y en
-   tabulares para que las de varias filas se puedan comparar de un vistazo. */
-.opcion-sobrecoste {
+/* Las dos cifras van apiladas a la derecha y en tabulares, para poder comparar
+   filas de un vistazo. Manda el total: la fila tiene que bastarse sola. El
+   sobrecoste va debajo, y se lee contra el titular de arriba. */
+.opcion-cifras {
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.25;
+}
+
+.opcion-total {
+  font-size: 16px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
-  font-size: 13px;
+}
+
+.opcion-sobrecoste {
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
   color: var(--tinta-2);
 }
 
-.opcion-mejor {
-  font-weight: 600;
-  color: var(--tinta);
-}
-
-/* Marcador de opción en el mapa: un anillo, sin número. No es un orden que
-   seguir, es una alternativa entre la que elegir. */
-.marcador-opcion span {
-  display: block;
-  width: 14px;
-  height: 14px;
-  margin: 4px;
-  background: transparent;
-  border: 3px solid var(--tinta);
-  border-radius: 50%;
-  box-shadow: 0 0 0 2px #fcfcfb;
-}
-
-.marcador-opcion-mejor span {
-  background: var(--tinta);
+/* "La mejor alternativa", no "la más barata": la más barata es el plan, y
+   ninguna alternativa lo iguala. */
+.opcion-insignia {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--marca-fuerte);
+  background: var(--marca-suave);
+  border-radius: var(--radio-pildora);
+  vertical-align: 1px;
 }
 
 .caducado {
   color: var(--tinta-apagada);
 }
 
-/* --- leyenda ------------------------------------------------------------- */
+/* --- tramos --------------------------------------------------------------- */
+
+.tramos {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tramos th,
+.tramos td {
+  padding: 7px 6px;
+  text-align: right;
+  border-top: 1px solid var(--linea);
+}
+
+.tramos th {
+  font-weight: 500;
+  color: var(--tinta-apagada);
+  border-top: 0;
+}
+
+.tramos th:first-child,
+.tramos td:first-child {
+  text-align: left;
+  color: var(--tinta);
+}
+
+/* --- leyenda: flota sobre el mapa, al lado de los puntos que explica ------- */
+
+#leyenda-mapa {
+  position: fixed;
+  z-index: 300; /* sobre el mapa (0), bajo la hoja (400) y la barra (600) */
+  right: 8px;
+  top: calc(var(--barra-alto) + 24px + env(safe-area-inset-top, 0px));
+  padding: 7px 12px;
+  background: var(--superficie);
+  border-radius: var(--radio-pildora);
+  box-shadow: var(--sombra-1);
+  /* No se pulsa: si interceptara el puntero se comería los arrastres del mapa
+     justo en la esquina donde vive. */
+  pointer-events: none;
+}
+
+#leyenda-mapa[hidden] {
+  display: none;
+}
+
+.leyenda-nota {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--tinta-apagada);
+}
 
 .leyenda-escala {
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 11.5px;
+  margin: 0;
+  font-size: 11px;
   color: var(--tinta-2);
 }
 
 .muestra {
   display: inline-block;
-  width: 14px;
-  height: 14px;
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   vertical-align: -2px;
 }
@@ -544,29 +995,31 @@ button.secundario:hover {
   border: 2px dashed;
 }
 
-/* --- avisos -------------------------------------------------------------- */
+/* --- avisos --------------------------------------------------------------- */
 
 .aviso {
   margin: 0 0 12px;
-  padding: 9px 11px;
-  font-size: 12.5px;
-  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 13px;
+  border-radius: 10px;
   border-left: 3px solid;
 }
 
 .aviso-atencion {
-  background: #fdf6e3;
+  background: var(--atencion-fondo);
   border-color: var(--atencion);
   color: var(--tinta);
 }
 
 .aviso-error {
-  background: #fbecec;
+  background: var(--critico-fondo);
   border-color: var(--critico);
   color: var(--tinta);
 }
 
-/* --- marcadores del mapa ------------------------------------------------- */
+/* ========================================================================== */
+/* Marcadores del mapa                                                        */
+/* ========================================================================== */
 
 .marcador-parada span,
 .marcador-extremo span {
@@ -574,12 +1027,12 @@ button.secundario:hover {
   width: 100%;
   height: 100%;
   font-family: var(--tipografia);
-  font-weight: 600;
+  font-weight: 700;
   color: #fff;
   text-align: center;
   border-radius: 50%;
-  border: 2px solid var(--superficie);
-  box-shadow: 0 1px 4px rgba(11, 11, 11, 0.4);
+  border: 2px solid var(--anillo);
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.45);
 }
 
 .marcador-parada span {
@@ -591,7 +1044,24 @@ button.secundario:hover {
 .marcador-extremo span {
   font-size: 14px;
   line-height: 26px;
-  background: var(--acento-fuerte);
+  background: var(--marca-fuerte);
+}
+
+/* Marcador de opción: un anillo, sin número. No es un orden que seguir, es una
+   alternativa entre la que elegir. */
+.marcador-opcion span {
+  display: block;
+  width: 14px;
+  height: 14px;
+  margin: 4px;
+  background: transparent;
+  border: 3px solid var(--tinta);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--anillo);
+}
+
+.marcador-opcion-mejor span {
+  background: var(--tinta);
 }
 
 .leaflet-popup-content {
@@ -600,23 +1070,131 @@ button.secundario:hover {
   line-height: 1.45;
 }
 
-/* --- pantallas estrechas: el panel pasa a hoja inferior ------------------- */
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: var(--superficie);
+  color: var(--tinta);
+}
 
-@media (max-width: 760px) {
-  body {
-    flex-direction: column;
+.leaflet-container a.leaflet-popup-close-button {
+  color: var(--tinta-apagada);
+}
+
+/* El control de zoom y la atribución de OSM, a juego con el resto. */
+.leaflet-bar a,
+.leaflet-control-attribution {
+  background: var(--superficie);
+  color: var(--tinta-2);
+}
+
+.leaflet-bar a {
+  border-bottom-color: var(--linea);
+}
+
+.leaflet-bar a:hover {
+  background: var(--superficie-2);
+  color: var(--tinta);
+}
+
+.leaflet-control-attribution a {
+  color: var(--tinta-2);
+}
+
+/* La atribución, en móvil, quedaría debajo de la hoja; también está escrita en
+   la pestaña de Ajustes, así que aquí basta con dejarla arriba del todo. */
+.leaflet-bottom.leaflet-right .leaflet-control-attribution {
+  margin-bottom: 0;
+  font-size: 10px;
+  opacity: 0.85;
+}
+
+/* ========================================================================== */
+/* Escritorio: la misma carcasa, apilada en una tarjeta a la izquierda        */
+/* ========================================================================== */
+
+@media (min-width: 900px) {
+  #barra-superior {
+    top: 12px;
+    left: 12px;
+    right: auto;
+    width: 400px;
+    border-radius: var(--radio-grande) var(--radio-grande) 0 0;
+    box-shadow: none;
+    filter: drop-shadow(0 6px 24px rgba(20, 17, 15, 0.14));
   }
 
-  #mapa {
-    height: 45vh;
-    flex: none;
-  }
-
-  #panel {
-    width: 100%;
+  /* La hoja se cuelga justo debajo de la barra: juntas leen como una tarjeta.
+     `--barra-alto` lo mide hoja.js, porque la barra crece con los mensajes. */
+  #hoja {
+    top: calc(12px + var(--barra-alto));
+    bottom: 12px;
+    left: 12px;
+    right: auto;
+    width: 400px;
     height: auto;
-    flex: 1;
-    border-left: none;
-    border-top: 1px solid var(--borde);
+    border-top: 1px solid var(--linea);
+    border-radius: 0 0 var(--radio-grande) var(--radio-grande);
+    box-shadow: none;
+    filter: drop-shadow(0 6px 24px rgba(20, 17, 15, 0.14));
+    transition: none;
+  }
+
+  #asa {
+    display: none;
+  }
+
+  /* La carcasa ocupa la izquierda: arriba a la derecha está libre del todo. */
+  #leyenda-mapa {
+    top: 20px;
+    right: 12px;
+  }
+
+  #hoja-cuerpo {
+    padding: 16px 18px 12px;
+  }
+
+  #hoja-pie {
+    padding: 12px 18px 14px;
+  }
+
+  #hoja-resumen:not(:empty) {
+    padding: 14px 18px 16px;
+  }
+
+  .marcas {
+    gap: 0 12px;
+  }
+
+  .marca {
+    min-height: 32px;
+  }
+}
+
+@media (min-width: 900px) and (prefers-color-scheme: dark) {
+  #barra-superior,
+  #hoja {
+    filter: drop-shadow(0 6px 24px rgba(0, 0, 0, 0.55));
+  }
+}
+
+/* Pantallas muy estrechas: el nombre de la marca estorba, basta el icono. */
+@media (max-width: 359px) {
+  .logotipo-texto {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .barra span {
+    width: 100%;
+    animation: none;
+  }
+
+  #hoja {
+    transition: none;
+  }
+
+  button.principal:active {
+    transform: none;
   }
 }

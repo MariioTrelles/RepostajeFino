@@ -2,171 +2,252 @@
 <html lang="es">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#1c1a17" media="(prefers-color-scheme: dark)" />
     <title>Repostaje Fino</title>
+    <link rel="icon" href="/logo.jpg" />
+    <link rel="apple-touch-icon" href="/logo.jpg" />
     <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
     <link rel="stylesheet" href="/estilos.css" />
   </head>
   <body>
-    <main id="mapa" aria-label="Mapa de la ruta y las gasolineras"></main>
+    <!-- El mapa es el fondo: la carcasa flota encima (§13.3). -->
+    <div id="mapa" aria-label="Mapa de la ruta y las gasolineras"></div>
 
-    <aside id="panel">
-      <header class="cabecera">
-        <h1>Repostaje Fino</h1>
-        <p class="lema">Dónde puedes parar a repostar y qué te cuesta cada opción.</p>
-      </header>
+    <!-- La escala de color de los precios, al lado de los puntos que explica.
+         La rellena mapa.js, que es quien tiene la rampa. -->
+    <div id="leyenda-mapa" hidden></div>
 
-      <!-- 1. Formulario -->
-      <section id="vista-formulario" class="vista">
-        <form id="formulario" novalidate>
-          <fieldset>
-            <legend>Trayecto</legend>
-            <p class="apunte">
-              Escribe una dirección o haz clic en el mapa. El clic fija el
-              <strong id="punto-armado">origen</strong>.
-            </p>
+    <!-- ------------------------------------------------------------------ -->
+    <!-- Barra superior: marca, origen y destino. Siempre visible.           -->
+    <!-- ------------------------------------------------------------------ -->
+    <header id="barra-superior">
+      <!-- `logotipo` y no `marca`: `.marca` ya es cada casilla de rótulo. -->
+      <a class="logotipo" href="/" aria-label="Repostaje Fino">
+        <span class="logotipo-icono"><img src="/logo.jpg" alt="" width="28" height="28" /></span>
+        <span class="logotipo-texto">Repostaje<b>Fino</b></span>
+      </a>
 
-            <div class="campo-busqueda" data-punto="origen">
-              <label for="busqueda-origen">Origen</label>
-              <div class="fila-entrada">
-                <input
-                  id="busqueda-origen"
-                  type="text"
-                  role="combobox"
-                  autocomplete="off"
-                  aria-expanded="false"
-                  aria-controls="sugerencias-origen"
-                  placeholder="Puerta del Sol, Madrid"
+      <div class="campos">
+        <span class="conector" aria-hidden="true">
+          <span class="conector-punto"></span>
+          <span class="conector-linea"></span>
+          <span class="conector-meta"></span>
+        </span>
+
+        <div class="campo-busqueda" data-punto="origen">
+          <label class="solo-lectores" for="busqueda-origen">Origen</label>
+          <div class="fila-entrada">
+            <input
+              id="busqueda-origen"
+              type="text"
+              role="combobox"
+              autocomplete="off"
+              aria-expanded="false"
+              aria-controls="sugerencias-origen"
+              placeholder="Desde dónde sales"
+            />
+            <button
+              type="button"
+              class="fijar-en-mapa"
+              data-fijar="origen"
+              aria-pressed="true"
+              aria-label="Fijar el origen con el próximo clic en el mapa"
+              title="Fijar el origen con el próximo clic en el mapa"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M12 21s7-6.2 7-11a7 7 0 1 0-14 0c0 4.8 7 11 7 11z"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linejoin="round"
                 />
-                <button
-                  type="button"
-                  class="fijar-en-mapa"
-                  data-fijar="origen"
-                  aria-pressed="true"
-                  title="Fijar el origen con el próximo clic en el mapa"
-                >
-                  Clic
-                </button>
-              </div>
-              <ul id="sugerencias-origen" class="sugerencias" role="listbox" hidden></ul>
-              <p class="estado-busqueda" role="status"></p>
-              <p class="coordenada" data-coordenada="origen"></p>
-            </div>
+                <circle cx="12" cy="10" r="2.4" fill="currentColor" />
+              </svg>
+            </button>
+          </div>
+          <ul id="sugerencias-origen" class="sugerencias" role="listbox" hidden></ul>
+          <p class="estado-busqueda" role="status"></p>
+          <p class="coordenada solo-lectores" data-coordenada="origen"></p>
+        </div>
 
-            <div class="campo-busqueda" data-punto="destino">
-              <label for="busqueda-destino">Destino</label>
-              <div class="fila-entrada">
-                <input
-                  id="busqueda-destino"
-                  type="text"
-                  role="combobox"
-                  autocomplete="off"
-                  aria-expanded="false"
-                  aria-controls="sugerencias-destino"
-                  placeholder="Plaza de Cataluña, Barcelona"
+        <div class="campo-busqueda" data-punto="destino">
+          <label class="solo-lectores" for="busqueda-destino">Destino</label>
+          <div class="fila-entrada">
+            <input
+              id="busqueda-destino"
+              type="text"
+              role="combobox"
+              autocomplete="off"
+              aria-expanded="false"
+              aria-controls="sugerencias-destino"
+              placeholder="A dónde vas"
+            />
+            <button
+              type="button"
+              class="fijar-en-mapa"
+              data-fijar="destino"
+              aria-pressed="false"
+              aria-label="Fijar el destino con el próximo clic en el mapa"
+              title="Fijar el destino con el próximo clic en el mapa"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M12 21s7-6.2 7-11a7 7 0 1 0-14 0c0 4.8 7 11 7 11z"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linejoin="round"
                 />
-                <button
-                  type="button"
-                  class="fijar-en-mapa"
-                  data-fijar="destino"
-                  aria-pressed="false"
-                  title="Fijar el destino con el próximo clic en el mapa"
-                >
-                  Clic
-                </button>
+                <circle cx="12" cy="10" r="2.4" fill="currentColor" />
+              </svg>
+            </button>
+          </div>
+          <ul id="sugerencias-destino" class="sugerencias" role="listbox" hidden></ul>
+          <p class="estado-busqueda" role="status"></p>
+          <p class="coordenada solo-lectores" data-coordenada="destino"></p>
+        </div>
+
+        <button
+          type="button"
+          id="intercambiar"
+          aria-label="Intercambiar origen y destino"
+          title="Intercambiar origen y destino"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M8 4v14m0 0-3.2-3.2M8 18l3.2-3.2M16 20V6m0 0-3.2 3.2M16 6l3.2 3.2"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+      </div>
+
+      <!-- Qué fija el próximo clic: la señal visible es el botón de chincheta
+           resaltado; esto es lo mismo dicho para un lector de pantalla. -->
+      <p class="solo-lectores" role="status">
+        El clic en el mapa fija el <strong id="punto-armado">origen</strong>.
+      </p>
+    </header>
+
+    <!-- ------------------------------------------------------------------ -->
+    <!-- La hoja: en móvil sube desde abajo, en escritorio es la tarjeta      -->
+    <!-- de la izquierda. Mismo DOM, distinto CSS.                            -->
+    <!-- ------------------------------------------------------------------ -->
+    <section id="hoja" data-snap="medio" aria-label="Panel de opciones">
+      <button id="asa" type="button" aria-label="Desplegar u ocultar el panel"></button>
+
+      <!-- La cifra del resultado va aquí, fuera del cuerpo con scroll y encima
+           de las pestañas: lo que has venido a ver no se esconde detrás de una
+           pestaña ni se va al hacer scroll. Lo pinta panel.js. -->
+      <div id="hoja-resumen"></div>
+
+      <div id="pestanas" role="tablist" aria-label="Secciones del panel"></div>
+
+      <div id="hoja-cuerpo">
+        <!-- 1. Formulario -->
+        <section id="vista-formulario" class="vista">
+          <form id="formulario" novalidate>
+            <div id="panel-vehiculo" class="panel" role="tabpanel" aria-labelledby="pestana-vehiculo">
+              <label class="ancho" for="combustible">Combustible</label>
+              <select id="combustible"></select>
+
+              <div class="rejilla">
+                <label>
+                  Consumo <span class="unidad">L/100 km</span>
+                  <input id="consumo" type="number" inputmode="decimal" step="0.1" min="0.1" value="6.5" />
+                </label>
+                <label>
+                  Depósito <span class="unidad">L</span>
+                  <input id="capacidad" type="number" inputmode="numeric" step="1" min="1" value="55" />
+                </label>
+                <label>
+                  Nivel actual <span class="unidad">L</span>
+                  <input id="nivel" type="number" inputmode="numeric" step="1" min="0" value="20" />
+                </label>
+                <label>
+                  Reserva <span class="unidad">L</span>
+                  <input id="reserva" type="number" inputmode="numeric" step="1" min="0" value="5" />
+                </label>
               </div>
-              <ul id="sugerencias-destino" class="sugerencias" role="listbox" hidden></ul>
-              <p class="estado-busqueda" role="status"></p>
-              <p class="coordenada" data-coordenada="destino"></p>
+              <p class="apunte">
+                La reserva es el colchón que no quieres gastar: el plan nunca te deja bajar
+                de ahí.
+              </p>
             </div>
-          </fieldset>
 
-          <fieldset>
-            <legend>Vehículo</legend>
-            <label class="ancho" for="combustible">Combustible</label>
-            <select id="combustible"></select>
-
-            <div class="rejilla">
-              <label>
-                Consumo <span class="unidad">L/100 km</span>
-                <input id="consumo" type="number" step="0.1" min="0.1" value="6.5" />
-              </label>
-              <label>
-                Depósito <span class="unidad">L</span>
-                <input id="capacidad" type="number" step="1" min="1" value="55" />
-              </label>
-              <label>
-                Nivel actual <span class="unidad">L</span>
-                <input id="nivel" type="number" step="1" min="0" value="20" />
-              </label>
-              <label>
-                Reserva <span class="unidad">L</span>
-                <input id="reserva" type="number" step="1" min="0" value="5" />
-              </label>
+            <div id="panel-marcas" class="panel" role="tabpanel" aria-labelledby="pestana-marcas" hidden>
+              <p class="apunte">
+                Sin marcar nada salen todas, independientes incluidas. Al marcar alguna,
+                el resto desaparece.
+              </p>
+              <div id="marcas" class="marcas"></div>
             </div>
-          </fieldset>
 
-          <details>
-            <summary>Marcas</summary>
-            <p class="apunte">
-              Sin marcar nada salen todas, independientes incluidas. Al marcar alguna,
-              el resto desaparece.
-            </p>
-            <div id="marcas" class="marcas"></div>
-          </details>
-
-          <details>
-            <summary>Ajustes de optimización</summary>
-            <div class="rejilla">
-              <label>
-                Desvío máximo <span class="unidad">km</span>
-                <input id="max-desvio" type="number" step="1" min="1" max="50" value="6" />
-              </label>
-              <label>
-                Parada <span class="unidad">s</span>
-                <input id="tiempo-parada" type="number" step="30" min="0" value="300" />
-              </label>
-              <label>
-                Candidatas <span class="unidad">máx.</span>
-                <input id="max-candidatas" type="number" step="10" min="2" max="250" value="50" />
-              </label>
-              <label>
-                Corredor <span class="unidad">km</span>
-                <input id="margen-corredor" type="number" step="1" min="1" max="50" value="5" />
-              </label>
+            <div id="panel-ajustes" class="panel" role="tabpanel" aria-labelledby="pestana-ajustes" hidden>
+              <div class="rejilla">
+                <label>
+                  Desvío máximo <span class="unidad">km</span>
+                  <input id="max-desvio" type="number" inputmode="numeric" step="1" min="1" max="50" value="6" />
+                </label>
+                <label>
+                  Parada <span class="unidad">s</span>
+                  <input id="tiempo-parada" type="number" inputmode="numeric" step="30" min="0" value="300" />
+                </label>
+                <label>
+                  Candidatas <span class="unidad">máx.</span>
+                  <input id="max-candidatas" type="number" inputmode="numeric" step="10" min="2" max="250" value="50" />
+                </label>
+                <label>
+                  Corredor <span class="unidad">km</span>
+                  <input id="margen-corredor" type="number" inputmode="numeric" step="1" min="1" max="50" value="5" />
+                </label>
+              </div>
+              <p class="apunte">
+                El desvío máximo son los kilómetros de más que admites por pasar por una
+                gasolinera, ida y vuelta: una a 3 km de la carretera son unos 6 km. Es lo
+                que decide si una gasolinera es una opción o no.
+              </p>
+              <p class="apunte">
+                Las candidatas son el mando del tiempo de respuesta: 50 son unos segundos
+                y 250, con el OSRM público, casi medio minuto.
+              </p>
+              <p class="pie">
+                Precios del Geoportal de Carburantes (MITECO) · rutas de OSRM · direcciones
+                de Photon · mapa de OpenStreetMap
+              </p>
             </div>
-            <p class="apunte">
-              El desvío máximo son los kilómetros de más que admites por pasar por una
-              gasolinera, ida y vuelta: una a 3 km de la carretera son unos 6 km. Es lo
-              que decide si una gasolinera es una opción o no.
-            </p>
-            <p class="apunte">
-              Las candidatas son el mando del tiempo de respuesta: 50 son unos segundos
-              y 250, con el OSRM público, casi medio minuto.
-            </p>
-          </details>
+          </form>
+        </section>
 
-          <p id="error-formulario" class="aviso aviso-error" hidden></p>
-          <button type="submit" class="principal">Calcular ruta óptima</button>
-        </form>
-      </section>
+        <!-- 2. Espera -->
+        <section id="vista-espera" class="vista" hidden>
+          <h2 class="titulo-aviso">Calculando…</h2>
+          <div class="barra" role="progressbar" aria-label="Calculando la ruta óptima"><span></span></div>
+          <p class="apunte" id="detalle-espera"></p>
+        </section>
 
-      <!-- 2. Espera -->
-      <section id="vista-espera" class="vista" hidden>
-        <h2 class="titulo-aviso">Calculando…</h2>
-        <div class="barra" role="progressbar" aria-label="Calculando la ruta óptima"><span></span></div>
-        <p class="apunte" id="detalle-espera"></p>
-      </section>
+        <!-- 3. Resultado y 4. fallos: los pinta panel.js -->
+        <section id="vista-resultado" class="vista" hidden></section>
+        <section id="vista-error" class="vista" hidden></section>
+      </div>
 
-      <!-- 3. Resultado y 4. fallos: los pinta panel.js -->
-      <section id="vista-resultado" class="vista" hidden></section>
-      <section id="vista-error" class="vista" hidden></section>
-
-      <footer class="pie">
-        Precios del Geoportal de Carburantes (MITECO) · rutas de OSRM · direcciones de
-        Photon · mapa de OpenStreetMap
-      </footer>
-    </aside>
+      <div id="hoja-pie">
+        <p id="error-formulario" class="aviso aviso-error" hidden></p>
+        <button type="submit" form="formulario" class="principal" id="calcular">
+          Calcular ruta óptima
+        </button>
+        <button type="button" class="secundario volver" id="volver" hidden>
+          Cambiar los datos
+        </button>
+      </div>
+    </section>
 
     <script src="/vendor/leaflet/leaflet.js"></script>
     <script type="module" src="/app.js"></script>

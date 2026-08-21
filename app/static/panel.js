@@ -7,7 +7,6 @@
  */
 
 import { crearBuscador } from "./geocoder.js";
-import { LEYENDA_CADUCADO, LEYENDA_PRECIO } from "./mapa.js";
 import { antiguedad, escapar, euros, eurosLitro, duracion, km, litros } from "./formato.js";
 
 const $ = (selector) => document.querySelector(selector);
@@ -22,6 +21,10 @@ export function mostrarVista(nombre) {
   for (const vista of VISTAS) {
     $(`#vista-${vista}`).hidden = vista !== nombre;
   }
+  // La carcasa (pestañas, botón del pie, altura de la hoja) se entera por
+  // aquí. Un evento y no una llamada a hoja.js: así panel.js no importa la
+  // carcasa y la carcasa sí puede leer lo que panel.js acaba de pintar.
+  document.dispatchEvent(new CustomEvent("vista:cambiada", { detail: nombre }));
 }
 
 // ---------------------------------------------------------------------------
@@ -217,65 +220,124 @@ const numero = (selector) => Number($(selector).value);
 // enseña al usuario un desvío negativo. El `desvio_km` del plan sí es fiable
 // porque el DP lo calcula dentro de la matriz, comparando lo comparable.
 
+/**
+ * El titular es la referencia, no un adorno.
+ *
+ * Vive en `#hoja-resumen`, fuera del cuerpo con scroll y por encima de las
+ * pestañas, así que se ve desde las dos. Eso es lo que hace legible el "+0,44 €"
+ * de una alternativa: el número contra el que se compara está en pantalla
+ * mientras lo lees. Antes el sobrecoste flotaba sin referencia y no significaba
+ * nada.
+ */
 export function pintarResultado(datos) {
+  const reposta = datos.paradas.length > 0;
+
+  $("#hoja-resumen").innerHTML = `
+    <p class="cifra-ceja">${reposta ? "El plan más barato" : "No hace falta repostar"}</p>
+    <span class="cifra-valor">${euros(datos.coste_combustible_eur)}</span>
+    <span class="cifra-etiqueta">
+      ${reposta ? "combustible del viaje" : "llegas con lo que llevas en el depósito"}
+    </span>
+    <dl class="fila-datos">
+      <div><dt>Repostado</dt><dd>${litros(datos.litros_repostados)}</dd></div>
+      <div><dt>Paradas</dt><dd>${datos.paradas.length}</dd></div>
+      <div><dt>Llegas con</dt><dd>${litros(datos.nivel_llegada_destino_l)}</dd></div>
+    </dl>`;
+
   const avisos =
     datos.avisos.length > 0
       ? `<p class="aviso aviso-atencion">${datos.avisos.map(escapar).join(" ")}</p>`
       : "";
 
+  // Sin alternativas no se pinta el panel, y hoja.js no monta esa pestaña: las
+  // pestañas salen de los paneles que existen, no de una lista fija.
+  const alternativas =
+    (datos.opciones ?? []).length === 0
+      ? ""
+      : `<div class="panel" id="panel-alternativas" role="tabpanel"
+              aria-labelledby="pestana-alternativas" hidden>
+           ${listaAlternativas(datos)}
+         </div>`;
+
   $("#vista-resultado").innerHTML = `
-    ${avisos}
-    <div class="cifra">
-      <span class="cifra-valor">${euros(datos.coste_combustible_eur)}</span>
-      <span class="cifra-etiqueta">combustible del viaje</span>
+    <div class="panel" id="panel-plan" role="tabpanel" aria-labelledby="pestana-plan">
+      ${avisos}
+      <p class="apunte">
+        ${km(datos.distancia_total_km)} en ${duracion(datos.duracion_total_s)}.
+        Desviarte a repostar añade <strong>${km(datos.desvio_km)}</strong> y
+        <strong>${duracion(datos.desvio_s)}</strong>.
+      </p>
+      ${listaParadas(datos)}
+      ${listaTramos(datos)}
     </div>
-    <dl class="fila-datos">
-      <div><dt>Repostado</dt><dd>${litros(datos.litros_repostados)}</dd></div>
-      <div><dt>Paradas</dt><dd>${datos.paradas.length}</dd></div>
-      <div><dt>Llegas con</dt><dd>${litros(datos.nivel_llegada_destino_l)}</dd></div>
-    </dl>
-    <p class="apunte">
-      ${km(datos.distancia_total_km)} en ${duracion(datos.duracion_total_s)}.
-      Desviarte a repostar añade <strong>${km(datos.desvio_km)}</strong> y
-      <strong>${duracion(datos.desvio_s)}</strong>.
-    </p>
-    ${listaParadas(datos)}
-    ${listaOpciones(datos)}
-    ${leyenda(datos.candidatas.length)}
-    <button type="button" class="secundario" id="volver">Cambiar los datos</button>
+    ${alternativas}
   `;
 }
 
-/** Las opciones son la respuesta a "¿y si prefiero parar antes?" (§8.6). */
-function listaOpciones(datos) {
+/** Tramo a tramo: la respuesta ya los trae calculados, y aquí hay sitio. */
+function listaTramos(datos) {
+  const tramos = datos.tramos ?? [];
+  if (tramos.length === 0) return "";
+
+  const filas = tramos
+    .map(
+      (tramo) => `
+      <tr>
+        <td>${escapar(tramo.desde)} → ${escapar(tramo.hasta)}</td>
+        <td>${km(tramo.distancia_km)}</td>
+        <td>${duracion(tramo.duracion_s)}</td>
+        <td>${litros(tramo.nivel_llegada_l)}</td>
+      </tr>`,
+    )
+    .join("");
+
+  return `
+    <h2 class="titulo-seccion">Tramo a tramo</h2>
+    <table class="tramos">
+      <thead>
+        <tr><th>Tramo</th><th>Distancia</th><th>Tiempo</th><th>Llegas con</th></tr>
+      </thead>
+      <tbody>${filas}</tbody>
+    </table>`;
+}
+
+/**
+ * Las alternativas: "¿y si prefiero parar antes?" (§8.6).
+ *
+ * Cada fila manda con su **precio total del viaje**, no con el sobrecoste. El
+ * sobrecoste va debajo, en pequeño. Así la fila se basta sola —dice lo que
+ * cuesta ese viaje— y el `+X €` se lee contra el titular, que está arriba sin
+ * moverse. Ninguna se etiqueta "la más barata": la más barata es el plan, y
+ * ninguna alternativa lo iguala (el plan puede repartir el repostaje en varias
+ * paradas y ellas son "paro aquí y ya").
+ */
+function listaAlternativas(datos) {
   const opciones = datos.opciones ?? [];
-  if (opciones.length === 0) return "";
 
   const filas = opciones
     .map((opcion) => {
-      const extra =
-        opcion.sobrecoste_eur > 0
-          ? `<span class="opcion-sobrecoste">+${euros(opcion.sobrecoste_eur)}</span>`
-          : `<span class="opcion-sobrecoste opcion-mejor">la más barata</span>`;
       const desvio =
         opcion.desvio_km > 0
           ? `+${km(opcion.desvio_km)} y +${opcion.desvio_min} min de desvío`
           : "sin desvío";
-      const otras =
-        opcion.paradas.length > 1
-          ? ` · y otra parada más adelante`
-          : "";
+      const otras = opcion.paradas.length > 1 ? " · y otra parada más adelante" : "";
+      const mejor = opcion.es_la_mas_barata
+        ? `<span class="opcion-insignia">la mejor alternativa</span>`
+        : "";
       return `
       <li class="opcion${opcion.es_la_mas_barata ? " opcion-optima" : ""}"
           data-estacion="${opcion.estacion.id}">
         <p class="opcion-cabecera">
           <span class="opcion-hora">${duracion(opcion.tiempo_desde_origen_s)}</span>
           <span class="opcion-rotulo">${escapar(opcion.estacion.rotulo)}</span>
-          ${extra}
+          <span class="opcion-cifras">
+            <span class="opcion-total">${euros(opcion.coste_viaje_eur)}</span>
+            <span class="opcion-sobrecoste">+${euros(opcion.sobrecoste_eur)}</span>
+          </span>
         </p>
         <p class="parada-lugar">${escapar(
           [opcion.estacion.direccion, opcion.estacion.municipio].filter(Boolean).join(", "),
-        )}</p>
+        )}${mejor}</p>
         <p class="parada-detalle">
           ${litros(opcion.litros)} a ${eurosLitro(opcion.precio_efectivo_eur_litro)} ·
           km ${Math.round(opcion.km_desde_origen)} · ${desvio}${otras}
@@ -285,12 +347,17 @@ function listaOpciones(datos) {
     .join("");
 
   return `
-    <h2 class="titulo-seccion">Dónde puedes parar</h2>
+    <h2 class="titulo-seccion">Si prefieres parar en otro sitio</h2>
     <p class="apunte">
-      El sobrecoste es lo que te cuesta de más el viaje entero si repostas ahí en vez
-      de en la más barata. El tiempo va en minutos: una hora tuya no vale euros.
+      Cada una es el viaje entero parando ahí, comparada con los
+      <strong>${euros(datos.coste_combustible_eur)}</strong> del plan. El tiempo va en
+      minutos: una hora tuya no vale euros.
     </p>
-    <ul class="opciones">${filas}</ul>`;
+    <ul class="opciones">${filas}</ul>
+    <p class="apunte">
+      ${datos.candidatas.length} estaciones compitieron por entrar en el plan. En el mapa
+      salen todas, con el color por precio.
+    </p>`;
 }
 
 function listaParadas(datos) {
@@ -328,24 +395,9 @@ function listaParadas(datos) {
   return `<h2 class="titulo-seccion">Paradas</h2><ol class="paradas">${filas}</ol>`;
 }
 
-function leyenda(cuantas) {
-  const escalones = LEYENDA_PRECIO.map(
-    (color) => `<span class="muestra" style="background:${color}"></span>`,
-  ).join("");
-  return `
-    <h2 class="titulo-seccion">En el mapa</h2>
-    <div class="leyenda">
-      <div class="leyenda-escala">
-        <span>más barata</span>${escalones}<span>más cara</span>
-      </div>
-      <p class="apunte">
-        ${cuantas} estaciones compitieron por entrar en el plan. Las de precio
-        caducado salen huecas y en gris
-        <span class="muestra muestra-hueca" style="border-color:${LEYENDA_CADUCADO}"></span>,
-        con la fecha en su ficha.
-      </p>
-    </div>`;
-}
+// La leyenda de la escala de precios se fue a `mapa.js`, que es quien tiene la
+// rampa: explica los colores al lado de los puntos que colorea, y de paso este
+// módulo deja de depender del de mapa.
 
 // ---------------------------------------------------------------------------
 // Fallos, uno por fila de la tabla de §6.2
@@ -383,7 +435,7 @@ function bajoReserva(error) {
     <p>${escapar(error.message)}</p>
     <h3 class="titulo-seccion">Más cerca del origen</h3>
     <ul class="cercanas">${cercanas}</ul>
-    <button type="button" class="secundario" id="volver">Cambiar los datos</button>
+    <button type="button" class="secundario volver">Cambiar los datos</button>
   `;
 }
 
@@ -400,7 +452,7 @@ function trayectoInviable(error, margenSugerido) {
       quitar el filtro de marcas o subir el número de candidatas.
     </p>
     <button type="button" class="principal" id="ensanchar">Reintentar con el corredor a ${margenSugerido} km</button>
-    <button type="button" class="secundario" id="volver">Cambiar los datos</button>
+    <button type="button" class="secundario volver">Cambiar los datos</button>
   `;
 }
 
@@ -409,7 +461,7 @@ function sinCandidatas(error, margenSugerido) {
     <h2 class="titulo-aviso">Ninguna estación utilizable</h2>
     <p>${escapar(error.message)}</p>
     <button type="button" class="principal" id="ensanchar">Reintentar con el corredor a ${margenSugerido} km</button>
-    <button type="button" class="secundario" id="volver">Cambiar los datos</button>
+    <button type="button" class="secundario volver">Cambiar los datos</button>
   `;
 }
 
@@ -424,6 +476,6 @@ function generico(error) {
     <h2 class="titulo-aviso">${titulos[error.tipo] ?? "Algo ha fallado"}</h2>
     <p>${escapar(error.message)}</p>
     <button type="button" class="principal" id="reintentar">Reintentar</button>
-    <button type="button" class="secundario" id="volver">Cambiar los datos</button>
+    <button type="button" class="secundario volver">Cambiar los datos</button>
   `;
 }
