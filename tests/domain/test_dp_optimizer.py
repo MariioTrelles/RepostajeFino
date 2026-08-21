@@ -17,6 +17,7 @@ from app.domain.dp_optimizer import (
     TrayectoInviable,
     VehiculoInvalido,
     optimizar_repostaje,
+    sobrecoste_por_candidata,
 )
 from app.domain.models import Vehiculo
 from app.domain.precio_efectivo import PerfilDescuento
@@ -597,3 +598,115 @@ def test_funciona_sin_matriz_de_duraciones(coche: Vehiculo) -> None:
     assert plan.numero_paradas == 1
     # Sin conducción cronometrada solo queda el rato de repostar: una parada, 300 s.
     assert plan.duracion_total_s == pytest.approx(300.0)
+
+
+# ---------------------------------------------------------------------------
+# Repostaje mínimo: el DP no puede proponer paradas que nadie haría (§8.1)
+# ---------------------------------------------------------------------------
+
+
+def _escenario_del_dedal() -> tuple[list, list[list[float]], list[list[float]]]:
+    """El caso que hace falta un mínimo: una cara justo antes de una barata lejos.
+
+    Son 300 km. Con 20 L y 5 L de reserva se llega al km 150 y ni un metro más,
+    así que la barata del km 155 queda a 5 km de distancia inalcanzable. Sin
+    mínimo, al DP le sale rentabilísimo entrar en la cara del km 145 a echar
+    medio litro —lo justo para alcanzar la barata— y llenar allí.
+    """
+    return escenario(
+        [
+            EstacionEnRuta(pk_km=145, precio_milesimas=1900),
+            EstacionEnRuta(pk_km=155, precio_milesimas=1000),
+        ],
+        largo_km=300,
+    )
+
+
+def test_sin_minimo_el_dp_propone_una_parada_de_medio_litro(coche: Vehiculo) -> None:
+    """El comportamiento de antes, que es lo que el mínimo viene a corregir.
+
+    Sirve de doble check: fija el óptimo sin restringir (15,45 €) para que el
+    test siguiente pueda enseñar exactamente lo que cuesta la restricción.
+    """
+    candidatas, distancias, duraciones = _escenario_del_dedal()
+
+    plan = optimizar_repostaje(
+        coche, candidatas, distancias, duraciones,
+        ParametrosOptimizacion(repostaje_minimo_l=0.0),
+    )
+
+    assert plan.numero_paradas == 2
+    dedal = plan.paradas[0]
+    assert dedal.km_desde_origen == pytest.approx(145.0)
+    assert dedal.litros == pytest.approx(0.5)
+    assert plan.coste_combustible_eur == Decimal("15.45")
+
+
+def test_el_minimo_destierra_las_paradas_simbolicas(coche: Vehiculo) -> None:
+    """Con mínimo, la parada del km 145 pasa de 0,5 L a 5 L y el plan sigue en pie.
+
+    Encarece el viaje de 15,45 € a 19,50 €, y eso está bien: los 4,05 € de
+    diferencia compraban un plan que en la carretera nadie iba a ejecutar.
+    """
+    candidatas, distancias, duraciones = _escenario_del_dedal()
+
+    plan = optimizar_repostaje(
+        coche, candidatas, distancias, duraciones,
+        ParametrosOptimizacion(repostaje_minimo_l=5.0),
+    )
+
+    assert plan.numero_paradas == 2
+    assert all(parada.litros >= 5.0 for parada in plan.paradas)
+    assert plan.paradas[0].litros == pytest.approx(5.0)
+    assert plan.paradas[1].litros == pytest.approx(10.0)
+    assert plan.coste_combustible_eur == Decimal("19.50")
+    # La restricción no puede colarse en el balance del depósito.
+    assert plan.nivel_llegada_destino_l == pytest.approx(5.0)
+
+
+def test_el_minimo_por_debajo_del_paso_es_no_tener_minimo(coche: Vehiculo) -> None:
+    """`min_u = 1` tiene que dar la tabla de siempre: el cambio solo generaliza."""
+    candidatas, distancias, duraciones = _escenario_del_dedal()
+
+    sin_minimo = optimizar_repostaje(
+        coche, candidatas, distancias, duraciones,
+        ParametrosOptimizacion(repostaje_minimo_l=0.0),
+    )
+    un_paso = optimizar_repostaje(
+        coche, candidatas, distancias, duraciones,
+        # Por debajo del paso de discretización no hay mínimo que imponer.
+        ParametrosOptimizacion(repostaje_minimo_l=0.25),
+    )
+
+    assert un_paso.coste_combustible_eur == sin_minimo.coste_combustible_eur
+    assert [p.litros for p in un_paso.paradas] == [p.litros for p in sin_minimo.paradas]
+
+
+def test_no_se_ofrece_parar_donde_no_caben_los_litros_minimos() -> None:
+    """Con el depósito casi lleno, parar en la primera deja de ser una opción.
+
+    Sale con 48 de 50 L: al llegar al km 20 le caben 2 L, menos del mínimo. La
+    respuesta correcta no es "para y echa 2 L", es que ahí no se para.
+    """
+    casi_lleno = Vehiculo(
+        consumo_l_100km=10.0,
+        tipo_combustible="diesel",
+        capacidad_deposito_l=50.0,
+        nivel_actual_l=48.0,
+        reserva_minima_l=5.0,
+    )
+    candidatas, distancias, duraciones = escenario(
+        [
+            EstacionEnRuta(pk_km=20, precio_milesimas=1500),
+            EstacionEnRuta(pk_km=200, precio_milesimas=1400),
+        ],
+        largo_km=300,
+    )
+
+    sobrecostes = sobrecoste_por_candidata(
+        casi_lleno, candidatas, distancias, duraciones,
+        ParametrosOptimizacion(repostaje_minimo_l=5.0),
+    )
+
+    assert sobrecostes[0] is None  # no caben 5 L: no es una parada que ofrecer
+    assert sobrecostes[1] is not None  # la de más adelante sí, y con hueco de sobra

@@ -703,6 +703,42 @@ que en una petición donde esperar a OSRM son dos segundos y medio no se nota.
 Si alguna vez hay que recortar tiempo, subirlo es legítimo, pero hay que mirar
 antes qué le hace a la comparación entre opciones.
 
+#### Repostaje mínimo útil (decidido el 21/08/2026: 5 litros)
+
+`REPOSTAJE_MINIMO_L = 5.0`. Al contrario que el paso, **esto no es un ajuste
+fino: es una restricción del mundo** que el DP no puede deducir de sus propios
+datos.
+
+Optimizando solo el precio salen planes que paran en una gasolinera cara a echar
+un dedal. Medido en Madrid-Barcelona antes de la restricción: el plan óptimo
+proponía **tres** paradas y dos de ellas eran de 0,25 L y 3,75 L, una de ellas en
+una REPSOL a 1,769 €/L. En la matriz esos céntimos salen a cuenta; en la
+carretera nadie se desvía, hace cola y pasa la tarjeta por un cuarto de litro. Un
+plan así es óptimo y a la vez inservible, que es la peor combinación posible: da
+un número que no se puede ejecutar y desluce justo el plan que la interfaz
+destaca (§13.3).
+
+Con el mínimo puesto, el mismo viaje sale con **dos** paradas de 5 L y 20,75 L y
+cuesta 39,06 € en vez de 38,98 €. Los ocho céntimos son el precio de que el plan
+se pueda cumplir.
+
+Implementación: entra como un **retardo en el barrido** de `_repostar_en`. Donde
+antes un reposte que termina en el nivel `m` podía haber arrancado en `m-1`,
+ahora arranca como muy tarde en `m - min_u`. Sigue siendo O(niveles) y con
+`min_u = 1` produce exactamente la tabla anterior, que es la forma barata de
+comprobar que solo generaliza. La pasada de vuelta (`_entrar_y_repostar`) lleva
+la misma restricción, mirando desde `llegada + min_u` en vez de `llegada + 1`:
+si solo estuviera en la ida, las dos tablas dejarían de cuadrar.
+
+Dos consecuencias que conviene tener presentes:
+
+- **La viabilidad no cambia en la práctica.** Repostar exige llegar con
+  `nivel <= capacidad - 5 L`, y quien llega por encima de eso no necesita
+  gasolina.
+- **Una candidata donde no quepan 5 L deja de ser ofrecible** (§8.6): la parada
+  obligatoria sale inviable y esa estación desaparece sola de la lista. Es lo
+  correcto: parar ahí no es una opción que tenga sentido ofrecer.
+
 ### 8.2. Coste del desvío (decidido: restricción dura, no precio de la hora)
 
 > **Esta sección se reescribió el 19/08/2026.** Antes decía que el coste era

@@ -84,6 +84,19 @@ from app.domain.precio_efectivo import PerfilDescuento, precio_efectivo
 # una petición donde esperar a OSRM son dos segundos y medio no se nota.
 PASO_DISCRETIZACION_L = 0.25
 
+# Cuánto hay que echar como poco para que la parada tenga sentido.
+#
+# Esto **no es un ajuste fino**, al contrario que el paso: es una restricción del
+# mundo real que el DP no puede deducir. Optimizando solo el precio, salen planes
+# que paran en una gasolinera cara a echar 0,2 L —medido en Madrid-Barcelona:
+# 0,2 L por 0,44 €— porque en la matriz esos céntimos salen a cuenta. En la
+# carretera nadie se desvía, hace cola y pasa la tarjeta por medio litro. Un plan
+# así es óptimo y a la vez inservible, que es la peor combinación posible.
+#
+# Cinco litros es el orden de magnitud de "he parado a repostar de verdad". El
+# valor exacto importa poco; que exista importa mucho.
+REPOSTAJE_MINIMO_L = 5.0
+
 _MICRO = 1_000_000  # micro-euros por euro
 _EPS = 1e-9
 
@@ -121,10 +134,14 @@ class ParametrosOptimizacion:
     desvío: entrar, repostar, pagar, salir. **No se convierte a euros** (§8.2):
     entra en la componente de tiempo de ``Coste``, que solo sirve para desempatar,
     y en el tiempo que se le informa al usuario en minutos.
+
+    ``repostaje_minimo_l`` es la única restricción de este objeto que no es un
+    ajuste fino sino una regla del mundo: ver ``REPOSTAJE_MINIMO_L``.
     """
 
     paso_discretizacion_l: float = PASO_DISCRETIZACION_L
     tiempo_parada_s: float = 300.0
+    repostaje_minimo_l: float = REPOSTAJE_MINIMO_L
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +224,7 @@ class _Modelo:
     cap_u: int
     reserva_u: int
     inicial_u: int
+    min_u: int  # repostaje mínimo, en unidades del DP
     paso: float
     parada_ms: int
 
@@ -273,6 +291,10 @@ def _construir_modelo(
             "no es la herramienta para esto: busca la estación más cercana y repón antes."
         )
 
+    # Hacia arriba y con suelo en 1: `min_u = 1` es "sin mínimo", que es
+    # exactamente el comportamiento anterior a que esto existiera.
+    min_u = max(1, math.ceil(parametros.repostaje_minimo_l / paso - _EPS))
+
     return _Modelo(
         vehiculo=vehiculo,
         distancias_km=distancias_km,
@@ -282,6 +304,7 @@ def _construir_modelo(
         cap_u=cap_u,
         reserva_u=reserva_u,
         inicial_u=inicial_u,
+        min_u=min_u,
         paso=paso,
         parada_ms=round(parametros.tiempo_parada_s * 1000),
     )
@@ -406,6 +429,7 @@ def sobrecoste_por_candidata(
             precio_unidad=modelo.precio_unidad(indice),
             parada_ms=modelo.parada_ms,
             obligatoria=True,
+            min_u=modelo.min_u,
         )
         mejor: Coste | None = None
         for nivel in range(modelo.cap_u + 1):
@@ -488,6 +512,7 @@ def _tabla_adelante(
             precio_unidad=precio_en(i),
             parada_ms=modelo.parada_ms,
             obligatoria=(i == primera_parada),
+            min_u=modelo.min_u,
         )
         repostando[i] = parar.repostando
 
@@ -521,6 +546,7 @@ def _repostar_en(
     precio_unidad: int | None,
     parada_ms: int,
     obligatoria: bool = False,
+    min_u: int = 1,
 ) -> _TrasParar:
     """Aplica la decisión "cuánto repostar aquí" a todos los niveles de golpe.
 
@@ -536,9 +562,17 @@ def _repostar_en(
 
     Con ``obligatoria``, no repostar deja de ser una opción: es como se responde
     "¿y si paro en esta?" sin escribir un segundo DP.
+
+    ``min_u`` es el repostaje mínimo (``REPOSTAJE_MINIMO_L``) en unidades. Entra
+    como un retardo en el barrido: un reposte que termina en ``nivel`` no puede
+    haber arrancado más tarde de ``nivel - min_u``. Con ``min_u = 1`` sale
+    exactamente la tabla de antes de que el mínimo existiera, que es la forma
+    barata de comprobar que esto solo generaliza.
     """
     unidad = Coste(precio_unidad or 0, 0)
     primera = Coste(precio_unidad or 0, parada_ms)
+    # Lo que cuesta el mínimo de golpe: la parada más las `min_u` unidades.
+    arranque = Coste(primera[0] + unidad[0] * (min_u - 1), primera[1])
 
     if precio_unidad is None:  # origen y destino no son estaciones
         vacio = [_INF] * (cap_u + 1)
@@ -547,13 +581,16 @@ def _repostar_en(
     repostando = [_INF] * (cap_u + 1)
     origen_reposte = [0] * (cap_u + 1)
 
-    for nivel in range(1, cap_u + 1):
-        empezar = llegada[nivel - 1] + primera if llegada[nivel - 1] < _INF else _INF
+    for nivel in range(min_u, cap_u + 1):
+        # El nivel de llegada que "se abre" ahora: repostar desde aquí ya alcanza
+        # el mínimo. Los de más arriba no llegan y nunca entran en el barrido.
+        arranca_en = nivel - min_u
+        empezar = llegada[arranca_en] + arranque if llegada[arranca_en] < _INF else _INF
         seguir = repostando[nivel - 1] + unidad if repostando[nivel - 1] < _INF else _INF
 
         if empezar <= seguir:
             repostando[nivel] = empezar
-            origen_reposte[nivel] = nivel - 1
+            origen_reposte[nivel] = arranca_en
         else:
             repostando[nivel] = seguir
             origen_reposte[nivel] = origen_reposte[nivel - 1]
@@ -607,7 +644,7 @@ def _tabla_atras(modelo: _Modelo) -> list[list[Coste]]:
                 continue
             if entrar[j] is None:
                 entrar[j] = _entrar_y_repostar(
-                    atras[j], cap_u, modelo.precio_unidad(j), modelo.parada_ms
+                    atras[j], cap_u, modelo.precio_unidad(j), modelo.parada_ms, modelo.min_u
                 )
             desde_j = entrar[j]
             assert desde_j is not None
@@ -624,7 +661,11 @@ def _tabla_atras(modelo: _Modelo) -> list[list[Coste]]:
 
 
 def _entrar_y_repostar(
-    atras_j: Sequence[Coste], cap_u: int, precio_unidad: int | None, parada_ms: int
+    atras_j: Sequence[Coste],
+    cap_u: int,
+    precio_unidad: int | None,
+    parada_ms: int,
+    min_u: int = 1,
 ) -> list[Coste]:
     """Coste desde ``j`` al destino habiendo llegado con cada nivel, repostando o no.
 
@@ -633,6 +674,11 @@ def _entrar_y_repostar(
     de ``m`` y otro que solo depende de ``llegada``. Barriendo ``m`` de arriba
     abajo y arrastrando el mínimo de ``m * precio + atras[m]`` sale el óptimo de
     todos los niveles de llegada de una vez.
+
+    El mínimo de repostaje entra igual de barato que en la ida: en vez de mirar
+    desde ``llegada + 1``, se mira desde ``llegada + min_u``. Tiene que estar
+    también aquí o la tabla de vuelta seguiría contando con repostajes de medio
+    litro que la de ida ya no permite, y las dos dejarían de cuadrar.
     """
     if precio_unidad is None:
         return list(atras_j)
@@ -646,7 +692,7 @@ def _entrar_y_repostar(
     resultado: list[Coste] = []
     for llegada in range(cap_u + 1):
         mejor = atras_j[llegada]  # seguir sin repostar
-        candidato = sufijo[llegada + 1]
+        candidato = sufijo[min(llegada + min_u, cap_u + 1)]
         if candidato < _INF:
             # Se le quita lo que ya tenía en el depósito y se le suma el tiempo de
             # la parada, que se paga una sola vez por mucho que se eche.
